@@ -266,6 +266,11 @@ export function startService(name, isManual = false) {
         return;
     }
 
+    if (isManual) {
+        state.restartCount = 0;
+        state.backoffDelay = appConfig.settings.restartDelayMs || 3000;
+    }
+
     if (state.restartTimer) {
         clearTimeout(state.restartTimer);
         state.restartTimer = null;
@@ -317,10 +322,17 @@ export function startService(name, isManual = false) {
     });
 
     child.once("exit", (code, signal) => {
-        state.child = null;
-        state.status = "STOPPED";
+        if (state.child === child) {
+            state.child = null;
+            state.status = "STOPPED";
+        }
 
         if (shuttingDown) return;
+
+        if (child.intentionalStop) {
+            log("EXIT", name, `Service stopped (code ${code ?? "none"}, signal ${signal ?? "none"}).`);
+            return;
+        }
 
         log("EXIT", name, `Exited with code ${code}, signal ${signal}`);
 
@@ -372,16 +384,20 @@ export function stopService(name) {
         state.restartTimer = null;
     }
 
-    if (state.child && state.child.pid) {
-        log("STOP", name, `Terminating PID ${state.child.pid}...`);
-        try {
-            if (process.platform === "win32") {
-                spawn("taskkill", ["/pid", state.child.pid.toString(), "/T", "/F"]);
-            } else {
-                state.child.kill("SIGTERM");
+    if (state.child) {
+        state.child.intentionalStop = true;
+        const pid = state.child.pid;
+        if (pid) {
+            log("STOP", name, `Terminating PID ${pid}...`);
+            try {
+                if (process.platform === "win32") {
+                    spawn("taskkill", ["/pid", pid.toString(), "/T", "/F"]);
+                } else {
+                    state.child.kill("SIGTERM");
+                }
+            } catch (err) {
+                logError("STOP ERROR", name, err.message);
             }
-        } catch (err) {
-            logError("STOP ERROR", name, err.message);
         }
     }
 
@@ -430,7 +446,7 @@ export async function reloadConfig() {
                 state.port = conf.port || null;
                 state.routes = conf.routes || [];
             }
-        } else if (!conf.enabled && state?.status === "RUNNING") {
+        } else if (!conf.enabled && (state?.status === "RUNNING" || state?.status === "STARTING" || state?.child || state?.restartTimer)) {
             log("CONFIG", name, "Stopping disabled service...");
             stopService(name);
         }
@@ -438,7 +454,7 @@ export async function reloadConfig() {
 
     // 2. Stop services removed from config
     for (const [name, state] of serviceRegistry) {
-        if (!appConfig.services[name] && state.status === "RUNNING") {
+        if (!appConfig.services[name] && (state.status === "RUNNING" || state.status === "STARTING" || state.child || state.restartTimer)) {
             log("CONFIG", name, "Service was removed from configuration. Stopping...");
             stopService(name);
         }
@@ -674,19 +690,35 @@ function setupConsoleCLI() {
 
             case "start": {
                 if (!target) {
-                    console.log("Usage: start <service-name>");
+                    console.log("Usage: start <service-name> (or 'start all')");
                     break;
                 }
-                startService(target, true);
+                if (target === "all") {
+                    console.log("Starting all enabled services...");
+                    for (const [name, conf] of Object.entries(appConfig.services)) {
+                        if (conf.enabled) {
+                            startService(name, true);
+                        }
+                    }
+                } else {
+                    startService(target, true);
+                }
                 break;
             }
 
             case "stop": {
                 if (!target) {
-                    console.log("Usage: stop <service-name>");
+                    console.log("Usage: stop <service-name> (or 'stop all')");
                     break;
                 }
-                stopService(target);
+                if (target === "all") {
+                    console.log("Stopping all services...");
+                    for (const name of serviceRegistry.keys()) {
+                        stopService(name);
+                    }
+                } else {
+                    stopService(target);
+                }
                 break;
             }
 
@@ -732,8 +764,8 @@ function setupConsoleCLI() {
 ├─────────────────────────────────────────────────────────────┤
 │  status | list      - Show status table of all services    │
 │  restart <name>     - Restart a specific service (or 'all') │
-│  start <name>       - Start an individual service           │
-│  stop <name>        - Stop an individual service            │
+│  start <name>       - Start an individual service (or 'all')│
+│  stop <name>        - Stop an individual service (or 'all') │
 │  reload             - Re-read services.json and apply       │
 │  install <name>     - Run npm install for a service         │
 │  build <name>       - Run npm run build for a service       │
