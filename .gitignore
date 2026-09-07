@@ -5,6 +5,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+services.json
 
 # Logs
 *.log

@@ -1,0 +1,38 @@
+{
+  "settings": {
+    "publicPort": 25575,
+    "restartDelayMs": 3000,
+    "maxCrashCount": 5,
+    "crashWindowMs": 60000,
+    "autoWatchConfig": true
+  },
+  "services": {
+    "discord-bot": {
+      "enabled": true,
+      "port": 8004,
+      "routes": ["/"],
+      "install": true,
+      "build": false,
+      "subProjects": [
+        {
+          "name": "dashboard",
+          "path": "dashboard",
+          "install": true,
+          "build": true
+        }
+      ]
+    },
+    "ndfy": {
+      "enabled": true,
+      "port": 8003,
+      "routes": ["/ndfy", "/ntfy"],
+      "install": true,
+      "build": true
+    },
+    "discord-assistant": {
+      "enabled": true,
+      "install": true,
+      "build": false
+    }
+  }
+}

@@ -3,60 +3,452 @@ import path from "path";
 import fs from "fs";
 import http from "http";
 import httpProxy from "http-proxy";
+import readline from "readline";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Public port allocated by your host
-const PUBLIC_PORT = Number(process.env.PORT) || 25575;
+/* =========================================================
+   ENV FILE LOADER (.env)
+========================================================= */
+function loadEnv() {
+    const envPath = path.join(__dirname, ".env");
+    if (!fs.existsSync(envPath)) return;
+    try {
+        if (typeof process.loadEnvFile === "function") {
+            process.loadEnvFile(envPath);
+        } else {
+            const content = fs.readFileSync(envPath, "utf-8");
+            for (const line of content.split("\n")) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith("#")) continue;
+                const eqIdx = trimmed.indexOf("=");
+                if (eqIdx !== -1) {
+                    const key = trimmed.slice(0, eqIdx).trim();
+                    let val = trimmed.slice(eqIdx + 1).trim();
+                    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                        val = val.slice(1, -1);
+                    }
+                    if (!(key in process.env)) {
+                        process.env[key] = val;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error(`[ENV] Failed to load .env: ${e.message}`);
+    }
+}
+loadEnv();
 
-// Internal ports for each service
-const SERVICE_PORTS = {
-    "ndfy": 8003,
-    "llm-discord": 8004,
+const CONFIG_PATH = path.join(__dirname, "services.json");
+const ADMIN_SECRET = process.env.ADMIN_SECRET || process.env.ADMIN_KEY || "hosting_admin_key";
+
+let shuttingDown = false;
+let appConfig = {
+    settings: {
+        publicPort: 25575,
+        restartDelayMs: 3000,
+        maxCrashCount: 5,
+        crashWindowMs: 60000,
+        autoWatchConfig: true
+    },
+    services: {}
 };
 
-const bots = [
-    "llm-discord",
-    "SofiHelper",
-    "Discord247",
-    "ndfy",
-];
-
-const installPackages = [
-    "llm-discord",
-    "llm-discord/dashboard",
-    "SofiHelper",
-    "Discord247",
-    "ndfy",
-];
-
-const buildPackages = [
-    "llm-discord/dashboard",
-    "ndfy",
-];
-
-const processes = new Map();
-const RESTART_DELAY = 3000;
-let shuttingDown = false;
+// Map<string, {
+//    child: ChildProcess | null,
+//    status: 'RUNNING' | 'STOPPED' | 'STARTING' | 'SUSPENDED',
+//    startTime: number | null,
+//    restartCount: number,
+//    lastCrashTime: number,
+//    backoffDelay: number,
+//    restartTimer: NodeJS.Timeout | null,
+//    port: number | null,
+//    routes: string[]
+// }>
+const serviceRegistry = new Map();
 
 /* =========================================================
-   LOGGING
+   LOGGING UTILITIES
 ========================================================= */
 
+function getTimestamp() {
+    return new Date().toLocaleTimeString();
+}
+
 function log(type, name, message) {
-    const time = new Date().toLocaleString();
-    console.log(`[${time}] [${type}] [${name}] ${message}`);
+    console.log(`[${getTimestamp()}] [${type}] [${name}] ${message}`);
 }
 
 function logError(type, name, message) {
-    const time = new Date().toLocaleString();
-    console.error(`[${time}] [${type}] [${name}] ${message}`);
+    console.error(`[${getTimestamp()}] [ERROR: ${type}] [${name}] ${message}`);
 }
 
 /* =========================================================
-   REVERSE PROXY GATEWAY (PORT 25575)
+   CONFIG LOADER & WATCHER
+========================================================= */
+
+function loadConfig() {
+    if (!fs.existsSync(CONFIG_PATH)) {
+        logError("CONFIG", "SYSTEM", `Configuration file not found at ${CONFIG_PATH}`);
+        return null;
+    }
+
+    try {
+        const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (!parsed.services || typeof parsed.services !== "object") {
+            throw new Error("Invalid config format: 'services' object is missing.");
+        }
+        return parsed;
+    } catch (err) {
+        logError("CONFIG", "SYSTEM", `Failed to read or parse services.json: ${err.message}`);
+        return null;
+    }
+}
+
+function watchConfigFile() {
+    let watchDebounce = null;
+    try {
+        fs.watch(CONFIG_PATH, (eventType) => {
+            if (eventType === "change" && appConfig.settings.autoWatchConfig) {
+                clearTimeout(watchDebounce);
+                watchDebounce = setTimeout(() => {
+                    log("CONFIG", "WATCHER", "services.json modified on disk. Synchronizing...");
+                    reloadConfig();
+                }, 1000);
+            }
+        });
+    } catch (err) {
+        logError("WATCHER", "SYSTEM", `Could not watch services.json: ${err.message}`);
+    }
+}
+
+/* =========================================================
+   DEPENDENCY INSTALL & BUILD
+========================================================= */
+
+function installDependencies(serviceName, subFolder = "", isDev = false) {
+    const targetFolder = path.join(__dirname, serviceName, subFolder);
+    const packageJsonPath = path.join(targetFolder, "package.json");
+
+    if (!fs.existsSync(packageJsonPath)) {
+        logError("NPM INSTALL", serviceName, `package.json not found in ${targetFolder}`);
+        return false;
+    }
+
+    const label = subFolder ? `${serviceName}/${subFolder}` : serviceName;
+    console.log(`[NPM INSTALL] ${label} -> installing dependencies...`);
+
+    const packageLockPath = path.join(targetFolder, "package-lock.json");
+    const args = fs.existsSync(packageLockPath)
+        ? (isDev ? ["ci", "--include=dev"] : ["ci", "--omit=dev"])
+        : (isDev ? ["install", "--include=dev"] : ["install", "--omit=dev"]);
+
+    const result = spawnSync("npm", args, {
+        cwd: targetFolder,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+        env: {
+            ...process.env,
+            ...(isDev ? { NODE_ENV: "development", NPM_CONFIG_PRODUCTION: "false" } : {})
+        }
+    });
+
+    if (result.error || result.status !== 0) {
+        logError("NPM INSTALL FAILED", label, `Exit status: ${result.status}`);
+        return false;
+    }
+
+    console.log(`[NPM INSTALL COMPLETE] ${label}`);
+    return true;
+}
+
+function buildPackage(serviceName, subFolder = "") {
+    const targetFolder = path.join(__dirname, serviceName, subFolder);
+    const packageJsonPath = path.join(targetFolder, "package.json");
+
+    const label = subFolder ? `${serviceName}/${subFolder}` : serviceName;
+
+    if (!fs.existsSync(packageJsonPath)) {
+        logError("BUILD", label, `package.json not found in ${targetFolder}`);
+        return false;
+    }
+
+    log("BUILD", label, "Running npm run build...");
+
+    const result = spawnSync("npm", ["run", "build"], {
+        cwd: targetFolder,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+        env: process.env
+    });
+
+    if (result.error || result.status !== 0) {
+        logError("BUILD FAILED", label, `Exit status: ${result.status}`);
+        return false;
+    }
+
+    log("BUILD COMPLETE", label, "Build finished successfully.");
+    return true;
+}
+
+/* =========================================================
+   ENTRY POINT RESOLUTION
+========================================================= */
+
+function getServiceEntryPoint(serviceDir) {
+    const packageJsonPath = path.join(serviceDir, "package.json");
+    if (fs.existsSync(packageJsonPath)) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+            if (pkg.main) {
+                const mainPath = path.join(serviceDir, pkg.main);
+                if (fs.existsSync(mainPath)) return mainPath;
+            }
+        } catch {}
+    }
+
+    const candidates = [
+        path.join(serviceDir, "src", "index.js"),
+        path.join(serviceDir, "dist", "bundle.cjs"),
+        path.join(serviceDir, "dist", "bundle.js"),
+        path.join(serviceDir, "bundle.cjs"),
+        path.join(serviceDir, "bundle.js"),
+        path.join(serviceDir, "dist", "index.js"),
+        path.join(serviceDir, "index.js")
+    ];
+
+    return candidates.find((file) => fs.existsSync(file)) ?? null;
+}
+
+/* =========================================================
+   PROCESS CONTROL & LIFECYCLE
+========================================================= */
+
+function getOrCreateServiceState(name) {
+    let state = serviceRegistry.get(name);
+    if (!state) {
+        state = {
+            child: null,
+            status: "STOPPED",
+            startTime: null,
+            restartCount: 0,
+            lastCrashTime: 0,
+            backoffDelay: appConfig.settings.restartDelayMs || 3000,
+            restartTimer: null,
+            port: appConfig.services[name]?.port || null,
+            routes: appConfig.services[name]?.routes || []
+        };
+        serviceRegistry.set(name, state);
+    }
+    return state;
+}
+
+export function startService(name, isManual = false) {
+    if (shuttingDown) return;
+
+    const conf = appConfig.services[name];
+    if (!conf) {
+        logError("START", name, `Service "${name}" does not exist in services.json.`);
+        return;
+    }
+
+    if (!conf.enabled && !isManual) {
+        return;
+    }
+
+    const state = getOrCreateServiceState(name);
+    if (state.status === "RUNNING" && state.child) {
+        log("WARN", name, `Service "${name}" is already running (PID ${state.child.pid}).`);
+        return;
+    }
+
+    if (state.restartTimer) {
+        clearTimeout(state.restartTimer);
+        state.restartTimer = null;
+    }
+
+    const serviceFolder = path.join(__dirname, name);
+    if (!fs.existsSync(serviceFolder)) {
+        logError("START", name, `Directory "${serviceFolder}" does not exist.`);
+        state.status = "STOPPED";
+        return;
+    }
+
+    const entryPoint = getServiceEntryPoint(serviceFolder);
+    if (!entryPoint) {
+        logError("START", name, `No valid entry point found (checked package.json main, src/index.js, index.js, dist/).`);
+        state.status = "STOPPED";
+        return;
+    }
+
+    state.status = "STARTING";
+    state.port = conf.port || null;
+    state.routes = conf.routes || [];
+
+    log("START", name, `Launching ${entryPoint}`);
+
+    const childEnv = {
+        ...process.env,
+        BOT_NAME: name,
+        ...(conf.port ? { PORT: String(conf.port) } : {})
+    };
+
+    const child = spawn(process.execPath, [entryPoint], {
+        cwd: serviceFolder,
+        stdio: "inherit",
+        env: childEnv,
+        windowsHide: true
+    });
+
+    state.child = child;
+    state.startTime = Date.now();
+    state.status = "RUNNING";
+
+    child.once("spawn", () => {
+        log("ONLINE", name, `PID ${child.pid}${conf.port ? ` [Internal Port: ${conf.port}]` : ""}`);
+    });
+
+    child.once("error", (err) => {
+        logError("PROCESS ERROR", name, err.message);
+    });
+
+    child.once("exit", (code, signal) => {
+        state.child = null;
+        state.status = "STOPPED";
+
+        if (shuttingDown) return;
+
+        log("EXIT", name, `Exited with code ${code}, signal ${signal}`);
+
+        const now = Date.now();
+        const crashWindow = appConfig.settings.crashWindowMs || 60000;
+        const maxCrashes = appConfig.settings.maxCrashCount || 5;
+
+        // Reset crash counter if it was running stably for more than the crash window
+        if (now - state.lastCrashTime > crashWindow) {
+            state.restartCount = 0;
+            state.backoffDelay = appConfig.settings.restartDelayMs || 3000;
+        }
+
+        state.restartCount++;
+        state.lastCrashTime = now;
+
+        // Circuit Breaker Triggered
+        if (state.restartCount > maxCrashes) {
+            state.status = "SUSPENDED";
+            logError(
+                "CIRCUIT BREAKER",
+                name,
+                `Exceeded ${maxCrashes} crashes within ${(crashWindow / 1000).toFixed(0)}s. Auto-restart suspended. Fix the error and run 'restart ${name}'.`
+            );
+            return;
+        }
+
+        log("AUTO-RESTART", name, `Restarting in ${(state.backoffDelay / 1000).toFixed(1)}s (Crash #${state.restartCount})...`);
+
+        state.restartTimer = setTimeout(() => {
+            state.restartTimer = null;
+            startService(name);
+        }, state.backoffDelay);
+
+        // Exponential backoff up to 30 seconds
+        state.backoffDelay = Math.min(state.backoffDelay * 1.5, 30000);
+    });
+}
+
+export function stopService(name) {
+    const state = serviceRegistry.get(name);
+    if (!state || (!state.child && !state.restartTimer)) {
+        log("INFO", name, "Service is not currently running or scheduled to restart.");
+        return;
+    }
+
+    if (state.restartTimer) {
+        clearTimeout(state.restartTimer);
+        state.restartTimer = null;
+    }
+
+    if (state.child && state.child.pid) {
+        log("STOP", name, `Terminating PID ${state.child.pid}...`);
+        try {
+            if (process.platform === "win32") {
+                spawn("taskkill", ["/pid", state.child.pid.toString(), "/T", "/F"]);
+            } else {
+                state.child.kill("SIGTERM");
+            }
+        } catch (err) {
+            logError("STOP ERROR", name, err.message);
+        }
+    }
+
+    state.status = "STOPPED";
+    state.child = null;
+}
+
+export function restartService(name) {
+    log("RESTART", name, `Restart requested for "${name}"`);
+    stopService(name);
+
+    const state = serviceRegistry.get(name);
+    if (state) {
+        state.restartCount = 0;
+        state.backoffDelay = appConfig.settings.restartDelayMs || 3000;
+    }
+
+    setTimeout(() => {
+        startService(name, true);
+    }, 1000);
+}
+
+/* =========================================================
+   DYNAMIC CONFIG SYNCHRONIZATION (RELOAD)
+========================================================= */
+
+export async function reloadConfig() {
+    log("CONFIG", "SYSTEM", "Synchronizing configuration with services.json...");
+    const freshConfig = loadConfig();
+    if (!freshConfig) {
+        logError("CONFIG", "SYSTEM", "Sync aborted due to invalid services.json.");
+        return;
+    }
+
+    appConfig = freshConfig;
+
+    // 1. Start newly enabled or added services
+    for (const [name, conf] of Object.entries(appConfig.services)) {
+        const state = serviceRegistry.get(name);
+        if (conf.enabled) {
+            if (!state || state.status === "STOPPED") {
+                log("CONFIG", name, "Starting enabled service...");
+                startService(name);
+            } else {
+                // Update dynamic routes/ports in memory
+                state.port = conf.port || null;
+                state.routes = conf.routes || [];
+            }
+        } else if (!conf.enabled && state?.status === "RUNNING") {
+            log("CONFIG", name, "Stopping disabled service...");
+            stopService(name);
+        }
+    }
+
+    // 2. Stop services removed from config
+    for (const [name, state] of serviceRegistry) {
+        if (!appConfig.services[name] && state.status === "RUNNING") {
+            log("CONFIG", name, "Service was removed from configuration. Stopping...");
+            stopService(name);
+        }
+    }
+
+    log("CONFIG", "SYSTEM", "Configuration synchronization complete.");
+}
+
+/* =========================================================
+   DYNAMIC REVERSE PROXY GATEWAY
 ========================================================= */
 
 function startGateway(publicPort) {
@@ -64,15 +456,42 @@ function startGateway(publicPort) {
 
     proxy.on("error", (err, req, res) => {
         if (res && res.writeHead) {
-            res.writeHead(502, { "Content-Type": "text/plain" });
-            res.end("502 Bad Gateway: Service is starting up or offline.");
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(
+                JSON.stringify({
+                    error: "502 Bad Gateway",
+                    message: "The requested backend service is starting up or temporarily offline.",
+                    timestamp: new Date().toISOString()
+                })
+            );
         } else if (res && res.destroy) {
             res.destroy();
         }
     });
 
+    function resolveTarget(url) {
+        // 1. Check exact / prefix route matches first
+        for (const [name, conf] of Object.entries(appConfig.services)) {
+            if (!conf.port || !conf.routes) continue;
+            for (const route of conf.routes) {
+                if (route !== "/" && url.startsWith(route)) {
+                    return `http://127.0.0.1:${conf.port}`;
+                }
+            }
+        }
+
+        // 2. Fallback to default root route ("/")
+        for (const [name, conf] of Object.entries(appConfig.services)) {
+            if (conf.port && conf.routes?.includes("/")) {
+                return `http://127.0.0.1:${conf.port}`;
+            }
+        }
+
+        return null;
+    }
+
     const server = http.createServer((req, res) => {
-        // 1. CORS headers
+        // Global CORS Headers
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "*");
@@ -84,242 +503,340 @@ function startGateway(publicPort) {
             return;
         }
 
-        // 2. Route /ndfy or /ntfy to ndfy
-        if (req.url.startsWith("/ndfy") || req.url.startsWith("/ntfy")) {
-            proxy.web(req, res, { target: `http://127.0.0.1:${SERVICE_PORTS["ndfy"]}` });
+        // Admin Management API Endpoint
+        if (req.url.startsWith("/_manage") || req.url === "/_health" || req.url === "/_status") {
+            handleAdminApi(req, res);
+            return;
+        }
+
+        const target = resolveTarget(req.url);
+        if (target) {
+            proxy.web(req, res, { target });
         } else {
-            // Everything else goes to llm-discord
-            proxy.web(req, res, { target: `http://127.0.0.1:${SERVICE_PORTS["llm-discord"]}` });
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "404 Not Found", message: "No active service mapped to this route." }));
         }
     });
 
-    // Handle WebSockets
+    // WebSocket Upgrades
     server.on("upgrade", (req, socket, head) => {
-        if (req.url.startsWith("/ndfy") || req.url.startsWith("/ntfy")) {
-            proxy.ws(req, socket, head, { target: `http://127.0.0.1:${SERVICE_PORTS["ndfy"]}` });
+        const target = resolveTarget(req.url);
+        if (target) {
+            proxy.ws(req, socket, head, { target });
         } else {
-            proxy.ws(req, socket, head, { target: `http://127.0.0.1:${SERVICE_PORTS["llm-discord"]}` });
+            socket.destroy();
         }
     });
 
     server.listen(publicPort, () => {
-        console.log("\n==========================================");
+        console.log("\n========================================================");
         console.log(` [GATEWAY ONLINE] Listening on public port ${publicPort}`);
-        console.log(` -> /ndfy/* (or /ntfy/*) ==> ndfy (127.0.0.1:${SERVICE_PORTS["ndfy"]})`);
-        console.log(` -> /*                   ==> llm-discord (127.0.0.1:${SERVICE_PORTS["llm-discord"]})`);
-        console.log("==========================================\n");
+        console.log(` -> Admin Secret: ${ADMIN_SECRET}`);
+        console.log("========================================================\n");
     });
 
     return server;
 }
 
+function handleAdminApi(req, res) {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+    const pathname = parsedUrl.pathname;
+    const token = parsedUrl.searchParams.get("key") || req.headers["x-admin-key"];
+
+    // Public health check without secret
+    if (pathname === "/_health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "OK", timestamp: new Date().toISOString() }));
+        return;
+    }
+
+    // Require token for admin operations
+    if (token !== ADMIN_SECRET) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "403 Forbidden", message: "Invalid or missing admin key." }));
+        return;
+    }
+
+    if (pathname === "/_manage/status" || pathname === "/_status") {
+        const summary = Array.from(serviceRegistry.entries()).map(([name, s]) => ({
+            name,
+            status: s.status,
+            pid: s.child?.pid || null,
+            port: s.port,
+            routes: s.routes,
+            uptimeSeconds: s.startTime && s.status === "RUNNING" ? Math.floor((Date.now() - s.startTime) / 1000) : 0,
+            restarts: s.restartCount
+        }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ services: summary, total: summary.length }));
+        return;
+    }
+
+    const action = parsedUrl.searchParams.get("action");
+    const serviceName = parsedUrl.searchParams.get("service");
+
+    if (action === "reload") {
+        reloadConfig();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, message: "services.json reloaded." }));
+        return;
+    }
+
+    if (action === "restart" && serviceName) {
+        restartService(serviceName);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, message: `Restarting ${serviceName}` }));
+        return;
+    }
+
+    if (action === "start" && serviceName) {
+        startService(serviceName, true);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, message: `Starting ${serviceName}` }));
+        return;
+    }
+
+    if (action === "stop" && serviceName) {
+        stopService(serviceName);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, message: `Stopping ${serviceName}` }));
+        return;
+    }
+
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Invalid action or parameters." }));
+}
+
 /* =========================================================
-   INSTALL DEPENDENCIES
+   INTERACTIVE CONSOLE (REPL CLI)
 ========================================================= */
 
-function installDependencies(packageName) {
-    if (!installPackages.includes(packageName)) {
-        return true;
+function setupConsoleCLI() {
+    if (!process.stdin.isTTY) {
+        return; // Headless environment, skip interactive prompt
     }
 
-    const folder = path.join(__dirname, packageName);
-    const packageJsonPath = path.join(folder, "package.json");
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        prompt: ""
+    });
 
-    if (!fs.existsSync(packageJsonPath)) {
-        logError("INSTALL ERROR", packageName, "package.json not found.");
-        return false;
-    }
+    rl.on("line", async (line) => {
+        const input = line.trim();
+        if (!input) return;
 
-    console.log(`[NPM INSTALL] ${packageName} -> installing dependencies...`);
+        const [command, ...args] = input.split(/\s+/);
+        const target = args[0];
 
-    const packageLockPath = path.join(folder, "package-lock.json");
-    const needsDev = buildPackages.includes(packageName);
+        switch (command.toLowerCase()) {
+            case "status":
+            case "list":
+            case "ls": {
+                const tableData = [];
+                for (const [name, conf] of Object.entries(appConfig.services)) {
+                    const state = serviceRegistry.get(name);
+                    const isRunning = state?.status === "RUNNING";
+                    const uptime = isRunning && state?.startTime
+                        ? `${Math.floor((Date.now() - state.startTime) / 1000)}s`
+                        : "-";
 
-    const args = fs.existsSync(packageLockPath)
-        ? (needsDev ? ["ci", "--include=dev"] : ["ci", "--omit=dev"])
-        : (needsDev ? ["install", "--include=dev"] : ["install", "--omit=dev"]);
+                    tableData.push({
+                        Service: name,
+                        Configured: conf.enabled ? "Enabled" : "Disabled",
+                        Status: state?.status || "STOPPED",
+                        PID: state?.child?.pid || "-",
+                        Port: conf.port || "-",
+                        Routes: conf.routes ? conf.routes.join(", ") : "-",
+                        Uptime: uptime,
+                        Crashes: state?.restartCount || 0
+                    });
+                }
+                console.table(tableData);
+                break;
+            }
 
-    const result = spawnSync("npm", args, {
-        cwd: folder,
-        stdio: "inherit",
-        shell: process.platform === "win32",
-        env: {
-            ...process.env,
-            ...(needsDev ? { NODE_ENV: "development", NPM_CONFIG_PRODUCTION: "false" } : {})
+            case "restart": {
+                if (!target) {
+                    console.log("Usage: restart <service-name> (or 'restart all')");
+                    break;
+                }
+                if (target === "all") {
+                    console.log("Restarting all enabled services...");
+                    for (const name of Object.keys(appConfig.services)) {
+                        restartService(name);
+                    }
+                } else {
+                    restartService(target);
+                }
+                break;
+            }
+
+            case "start": {
+                if (!target) {
+                    console.log("Usage: start <service-name>");
+                    break;
+                }
+                startService(target, true);
+                break;
+            }
+
+            case "stop": {
+                if (!target) {
+                    console.log("Usage: stop <service-name>");
+                    break;
+                }
+                stopService(target);
+                break;
+            }
+
+            case "reload": {
+                await reloadConfig();
+                break;
+            }
+
+            case "install": {
+                if (!target) {
+                    console.log("Usage: install <service-name>");
+                    break;
+                }
+                const conf = appConfig.services[target];
+                installDependencies(target, "", conf?.build);
+                if (conf?.subProjects) {
+                    for (const sub of conf.subProjects) {
+                        if (sub.install) installDependencies(target, sub.path, sub.build);
+                    }
+                }
+                break;
+            }
+
+            case "build": {
+                if (!target) {
+                    console.log("Usage: build <service-name>");
+                    break;
+                }
+                const conf = appConfig.services[target];
+                if (conf?.build) buildPackage(target);
+                if (conf?.subProjects) {
+                    for (const sub of conf.subProjects) {
+                        if (sub.build) buildPackage(target, sub.path);
+                    }
+                }
+                break;
+            }
+
+            case "help": {
+                console.log(`
+┌─────────────────────────────────────────────────────────────┐
+│                 HOSTING MANAGER CLI COMMANDS                │
+├─────────────────────────────────────────────────────────────┤
+│  status | list      - Show status table of all services    │
+│  restart <name>     - Restart a specific service (or 'all') │
+│  start <name>       - Start an individual service           │
+│  stop <name>        - Stop an individual service            │
+│  reload             - Re-read services.json and apply       │
+│  install <name>     - Run npm install for a service         │
+│  build <name>       - Run npm run build for a service       │
+│  help               - Display this help menu                │
+└─────────────────────────────────────────────────────────────┘
+                `);
+                break;
+            }
+
+            default:
+                console.log(`Unknown command: "${command}". Type "help" for a list of commands.`);
+                break;
         }
     });
-
-    if (result.error || result.status !== 0) {
-        logError("NPM INSTALL FAILED", packageName, `Status: ${result.status}`);
-        return false;
-    }
-
-    console.log(`[NPM INSTALL COMPLETE] ${packageName}`);
-    return true;
 }
 
 /* =========================================================
-   BUILD PACKAGES
-========================================================= */
-
-function buildPackage(packageName) {
-    const folder = path.join(__dirname, packageName);
-    const packageJsonPath = path.join(folder, "package.json");
-
-    if (!fs.existsSync(packageJsonPath)) {
-        logError("BUILD", packageName, "package.json not found.");
-        return false;
-    }
-
-    log("BUILD", packageName, "Running npm run build...");
-
-    const result = spawnSync("npm", ["run", "build"], {
-        cwd: folder,
-        stdio: "inherit",
-        shell: process.platform === "win32"
-    });
-
-    if (result.error || result.status !== 0) {
-        logError("BUILD FAILED", packageName, `Status: ${result.status}`);
-        return false;
-    }
-
-    log("BUILD COMPLETE", packageName, "Build finished.");
-    return true;
-}
-
-/* =========================================================
-   FIND BOT ENTRY POINT
-========================================================= */
-
-function getBotEntryPoint(botDir) {
-    const packageJsonPath = path.join(botDir, "package.json");
-    if (fs.existsSync(packageJsonPath)) {
-        try {
-            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
-            if (pkg.main) {
-                const mainPath = path.join(botDir, pkg.main);
-                if (fs.existsSync(mainPath)) {
-                    return mainPath;
-                }
-            }
-        } catch {}
-    }
-
-    const candidates = [
-        path.join(botDir, "dist", "bundle.cjs"),
-        path.join(botDir, "dist", "bundle.js"),
-        path.join(botDir, "bundle.cjs"),
-        path.join(botDir, "bundle.js"),
-        path.join(botDir, "dist", "index.js"),
-        path.join(botDir, "index.js")
-    ];
-
-    return candidates.find(file => fs.existsSync(file)) ?? null;
-}
-
-/* =========================================================
-   START BOT
-========================================================= */
-
-function startBot(bot) {
-    if (shuttingDown) return;
-
-    const botFolder = path.join(__dirname, bot);
-    if (!fs.existsSync(botFolder)) {
-        logError("START", bot, "Bot directory not found.");
-        return;
-    }
-
-    const botPath = getBotEntryPoint(botFolder);
-    if (!botPath) {
-        logError("START", bot, "No valid entry point found.");
-        return;
-    }
-
-    log("START", bot, `Running ${botPath}`);
-
-    // Override PORT so each child gets its dedicated internal port
-    const childEnv = {
-        ...process.env,
-        BOT_NAME: bot,
-        ...(SERVICE_PORTS[bot] ? { PORT: String(SERVICE_PORTS[bot]) } : {})
-    };
-
-    const child = spawn(process.execPath, [botPath], {
-        cwd: botFolder,
-        stdio: "inherit",
-        env: childEnv,
-        windowsHide: true
-    });
-
-    processes.set(bot, child);
-
-    child.once("spawn", () => log("ONLINE", bot, `PID ${child.pid}`));
-    child.once("error", error => logError("PROCESS ERROR", bot, error.message));
-    child.once("exit", (code, signal) => {
-        processes.delete(bot);
-        if (shuttingDown) return;
-
-        log("EXIT", bot, `code=${code}, signal=${signal}`);
-        log("RESTART", bot, `Restarting in ${RESTART_DELAY / 1000}s...`);
-
-        setTimeout(() => startBot(bot), RESTART_DELAY);
-    });
-}
-
-/* =========================================================
-   SHUTDOWN
+   SHUTDOWN & PROCESS ERROR GUARDS
 ========================================================= */
 
 function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
 
-    console.log(`\n[SHUTDOWN] Received ${signal}`);
+    console.log(`\n[SHUTDOWN] Received ${signal}. Terminating all child processes...`);
 
-    for (const [bot, child] of processes) {
-        log("STOP", bot, `Stopping PID ${child.pid}`);
-        try {
-            child.kill("SIGTERM");
-        } catch (error) {
-            logError("STOP ERROR", bot, error.message);
-        }
+    for (const [name] of serviceRegistry) {
+        stopService(name);
     }
 
-    setTimeout(() => process.exit(0), 3000).unref();
+    setTimeout(() => {
+        console.log("[SHUTDOWN] All services stopped. Exiting manager.");
+        process.exit(0);
+    }, 1500).unref();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
+// Global safety net to prevent gateway crashes from rogue errors
+process.on("uncaughtException", (err) => {
+    logError("UNCAUGHT EXCEPTION", "SYSTEM", err.stack || err.message);
+});
+
+process.on("unhandledRejection", (reason) => {
+    logError("UNHANDLED REJECTION", "SYSTEM", String(reason));
+});
+
 /* =========================================================
-   MAIN
+   MAIN INITIALIZATION
 ========================================================= */
 
-function main() {
-    console.log("\n==========================================");
-    console.log("           Discord Bot Manager");
-    console.log("==========================================\n");
+async function main() {
+    console.log("\n========================================================");
+    console.log("            Robust Multi-Service Gateway Manager        ");
+    console.log("========================================================\n");
 
-    // STEP 1: Install
-    for (const packageName of installPackages) {
-        if (!fs.existsSync(path.join(__dirname, packageName))) continue;
-        installDependencies(packageName);
+    const loaded = loadConfig();
+    if (loaded) {
+        appConfig = loaded;
     }
 
-    // STEP 2: Build
-    for (const packageName of buildPackages) {
-        buildPackage(packageName);
+    const publicPort = Number(process.env.PORT) || appConfig.settings?.publicPort || 25575;
+
+    // 1. Initial Dependency Check & Builds
+    log("INIT", "SYSTEM", "Checking dependencies and builds for enabled services...");
+    for (const [name, conf] of Object.entries(appConfig.services)) {
+        if (!conf.enabled) continue;
+
+        if (conf.install) {
+            installDependencies(name, "", conf.build);
+        }
+
+        if (conf.build) {
+            buildPackage(name);
+        }
+
+        if (conf.subProjects) {
+            for (const sub of conf.subProjects) {
+                if (sub.install) installDependencies(name, sub.path, sub.build);
+                if (sub.build) buildPackage(name, sub.path);
+            }
+        }
     }
 
-    // STEP 3: Start Services
-    for (const bot of bots) {
-        startBot(bot);
+    // 2. Start all configured services
+    log("INIT", "SYSTEM", "Starting configured services...");
+    for (const [name, conf] of Object.entries(appConfig.services)) {
+        if (conf.enabled) {
+            startService(name);
+        }
     }
 
-    // STEP 4: Start Public Gateway on Port 25575
-    startGateway(PUBLIC_PORT);
+    // 3. Start Public Gateway Server
+    startGateway(publicPort);
+
+    // 4. Start File Watcher on services.json
+    watchConfigFile();
+
+    // 5. Initialize Interactive Terminal CLI
+    setupConsoleCLI();
+
+    log("READY", "SYSTEM", "Manager is operational. Type 'help' or 'status' in console.");
 }
 
 main();
