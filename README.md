@@ -7,6 +7,20 @@ A multi-bot and service manager with a dynamic reverse proxy gateway, automatic 
 
 ---
 
+## Why Hosting Manager?
+
+Many budget hosting providers, PaaS platforms, and bot panels limit deployments to a **single entry point** (`npm start`) and a **single public port**. Running multiple bots, webhooks, or dashboards traditionally requires purchasing multiple hosting plans or configuring complex Nginx/Docker setups.
+
+**Hosting Manager enables your hosting environment to support multiple `index.js` applications simultaneously:**
+
+- **Multiple Applications on One Instance**: Run multiple independent bots, webhooks, and APIs concurrently in isolated child processes under a single root command.
+- **Single Public Port Routing**: Route incoming HTTP and WebSocket traffic (e.g., `/api`, `/dashboard`, `/bot`) to different internal services using the integrated reverse proxy gateway.
+- **Process Isolation and Self-Healing**: If one service crashes, other services remain uninterrupted while the circuit breaker manages automatic retries with exponential backoff.
+- **Zero-Downtime Configuration**: Add, enable, or disable services dynamically by editing `services.json`—the file watcher updates processes without restarting the host.
+- **Zero Configuration Overhead**: No Nginx, Docker, or PM2 configurations needed. Place your service directories in the project root and launch.
+
+---
+
 ## Features
 
 - **Dynamic Reverse Proxy Gateway**: Built-in HTTP and WebSocket proxying (`http-proxy`) with route-based request dispatching to backend services.
