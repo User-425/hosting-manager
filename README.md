@@ -1,6 +1,7 @@
 # Hosting Manager
+One server, multiple apps. Run all your Node.js services under a single entry instance.
 
-Multi-bot and service manager with a dynamic reverse proxy gateway, automatic crash recovery, live configuration watching, and interactive CLI management.
+A multi-bot and service manager with a dynamic reverse proxy gateway, automatic crash recovery, live configuration watching, and interactive CLI management.
 
 ![Hosting Manager Preview](docs/preview.png)
 
