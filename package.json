@@ -1,0 +1,13 @@
+{
+  "name": "hosting-manager",
+  "version": "1.0.0",
+  "description": "Multi-bot and service manager with reverse proxy gateway",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  }
+}
