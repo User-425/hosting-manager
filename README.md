@@ -185,6 +185,7 @@ When run in an interactive terminal, the manager provides a command prompt:
 | `install` | `install <service-name>` | Triggers dependency installation for the service and its sub-projects. |
 | `build` | `build <service-name>` | Triggers `npm run build` for the service and its sub-projects. |
 | `exec` / `cmd` | `exec <service-name \| .> <cmd>` | Executes a command within the service or manager directory. |
+| `clear` / `cls` | `clear` | Clears the terminal console screen. |
 | `help` | `help` | Displays the help menu and list of available commands. |
 
 ---

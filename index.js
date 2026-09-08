@@ -790,6 +790,12 @@ function setupConsoleCLI() {
                 break;
             }
             
+            case "clear":
+            case "cls": {
+                console.clear();
+                break;
+            }
+
             case "help": {
                 console.log(`
 ┌─────────────────────────────────────────────────────────────┐
