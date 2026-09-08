@@ -757,18 +757,53 @@ function setupConsoleCLI() {
                 break;
             }
 
+            case "exec":
+            case "cmd": {
+                if (args.length < 2) {
+                    console.log("Usage: exec <service-name | .> <command...>");
+                    console.log("Example: exec discord-bot npm test");
+                    console.log("Example: exec . curl http://localhost:25575/_health");
+                    break;
+                }
+
+                const targetDir = target === "." ? __dirname : path.resolve(__dirname, target);
+                const rawCmd = args.slice(1).join(" ");
+
+                if (!fs.existsSync(targetDir)) {
+                    console.log(`[EXEC ERROR] Directory "${targetDir}" does not exist.`);
+                    break;
+                }
+
+                console.log(`\n[Directory]: ${targetDir}`);
+                console.log(`[Running]  : ${rawCmd}\n`);
+
+                const res = spawnSync(rawCmd, {
+                    cwd: targetDir,
+                    stdio: "inherit",
+                    shell: true,
+                    env: process.env
+                });
+
+                if (res.error) {
+                    console.error(`[EXEC ERROR]: ${res.error.message}`);
+                }
+                break;
+            }
+            
             case "help": {
                 console.log(`
 ┌─────────────────────────────────────────────────────────────┐
 │                 HOSTING MANAGER CLI COMMANDS                │
 ├─────────────────────────────────────────────────────────────┤
-│  status | list      - Show status table of all services    │
+│  status | list | ls - Show status table of all services    │
 │  restart <name>     - Restart a specific service (or 'all') │
 │  start <name>       - Start an individual service (or 'all')│
 │  stop <name>        - Stop an individual service (or 'all') │
 │  reload             - Re-read services.json and apply       │
 │  install <name>     - Run npm install for a service         │
 │  build <name>       - Run npm run build for a service       │
+│  exec <name|.> <cmd>- Run any custom command in directory   │
+│  clear | cls        - Clear the console screen              │
 │  help               - Display this help menu                │
 └─────────────────────────────────────────────────────────────┘
                 `);
