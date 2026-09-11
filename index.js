@@ -801,7 +801,7 @@ function setupConsoleCLI() {
 ┌─────────────────────────────────────────────────────────────┐
 │                 HOSTING MANAGER CLI COMMANDS                │
 ├─────────────────────────────────────────────────────────────┤
-│  status | list | ls - Show status table of all services    │
+│  status | list | ls - Show status table of all services     │
 │  restart <name>     - Restart a specific service (or 'all') │
 │  start <name>       - Start an individual service (or 'all')│
 │  stop <name>        - Stop an individual service (or 'all') │
