@@ -90,6 +90,11 @@ NODE_ENV=production
 | `PORT` | Public port the reverse proxy gateway listens on | `25575` |
 | `ADMIN_SECRET` | Secret token used to authenticate Admin API endpoints | `hosting_admin_key` |
 | `NODE_ENV` | Environment mode (`production` or `development`) | `development` |
+| `NTFY_ENABLED` | Enable or disable the ntfy integration | `true` |
+| `NTFY_TOPIC` | Ntfy topic to listen to for incoming remote commands | - |
+| `NTFY_SERVER` | Custom ntfy server URL | `https://ntfy.sh` |
+| `NTFY_AUTH` | Authorization header for private ntfy topics | - |
+| `NTFY_PREFIX` | Prefix required to execute a command (e.g., `!`) | `""` |
 
 ### 4. Service Configuration (`services.json`)
 
@@ -149,6 +154,12 @@ Example configuration:
 - `settings.maxCrashCount` *(number)*: Maximum allowed consecutive crashes before triggering circuit breaker.
 - `settings.crashWindowMs` *(number)*: Window (in ms) after which crash counters reset for stable services.
 - `settings.autoWatchConfig` *(boolean)*: Automatically reload configuration when `services.json` changes.
+- `settings.ntfyEnabled` *(boolean)*: Enable or disable the ntfy listener.
+- `settings.ntfyTopic` *(string)*: Topic name to listen to on the ntfy server.
+- `settings.ntfyServer` *(string)*: Custom ntfy server URL (defaults to `https://ntfy.sh`).
+- `settings.ntfyAuth` *(string)*: Authorization header string for private topics.
+- `settings.ntfyPrefix` *(string)*: Prefix required for ntfy commands to execute.
+- `settings.ntfyAliases` *(object)*: Map of custom command aliases to actual commands.
 
 #### Service Definition Schema
 
@@ -245,6 +256,47 @@ Supported actions:
 - `restart`: Restart the target service (`&service=<name>`).
 - `start`: Start the target service (`&service=<name>`).
 - `stop`: Stop the target service (`&service=<name>`).
+
+---
+
+## Ntfy Remote Commands Integration
+
+Hosting Manager includes a built-in listener for [ntfy.sh](https://ntfy.sh/) (or custom self-hosted ntfy servers), allowing you to securely execute commands from your phone or any external webhook by simply sending a push notification.
+
+### 1. Configuration
+
+Add the following to your `.env` file:
+```env
+NTFY_ENABLED=true
+NTFY_TOPIC=my_secret_hosting_topic
+NTFY_SERVER=https://ntfy.sh
+NTFY_AUTH=Bearer tk_your_access_token
+NTFY_PREFIX=!
+```
+
+Alternatively, you can configure these directly in your `services.json` under `settings`:
+```json
+  "settings": {
+    "ntfyEnabled": true,
+    "ntfyTopic": "my_secret_hosting_topic",
+    "ntfyServer": "https://ntfy.sh",
+    "ntfyAuth": "Bearer tk_your_access_token",
+    "ntfyPrefix": "!",
+    "ntfyAliases": {
+      "deploy": "exec my-service npm run start"
+    }
+  }
+```
+
+### 2. Custom Aliases & Prefixes
+- **Prefixes**: For security, you can enforce a prefix (like `!`). Messages lacking the prefix will be safely ignored. Sending `!status` executes `status`.
+- **Aliases**: You can map short commands to longer scripts. With the alias configured above, sending `!deploy` translates to executing `exec my-service npm run start`.
+
+### 3. Sending Notifications via CLI
+You can also use the integrated console to send push notifications outward:
+```text
+ntfy my_alerts Deploy completed successfully!
+```
 
 ---
 

@@ -4,7 +4,15 @@
     "restartDelayMs": 3000,
     "maxCrashCount": 5,
     "crashWindowMs": 60000,
-    "autoWatchConfig": true
+    "autoWatchConfig": true,
+    "ntfyEnabled": true,
+    "ntfyTopic": "my_secret_hosting_topic",
+    "ntfyServer": "https://ntfy.sh",
+    "ntfyAuth": "Bearer tk_your_access_token",
+    "ntfyPrefix": "!",
+    "ntfyAliases": {
+      "deploy": "exec my-folder npm run start"
+    }
   },
   "services": {
     "discord-bot": {

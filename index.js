@@ -5,6 +5,7 @@ import { startService, stopService, watchConfigFile } from "./src/process-manage
 import { installDependencies, buildPackage } from "./src/builder.js";
 import { startGateway } from "./src/gateway.js";
 import { setupConsoleCLI } from "./src/cli.js";
+import { startNtfyListener } from "./src/ntfy-listener.js";
 
 loadEnv();
 
@@ -77,6 +78,7 @@ async function main() {
     startGateway(publicPort);
     watchConfigFile();
     setupConsoleCLI();
+    startNtfyListener();
 
     log("READY", "SYSTEM", "Manager is operational. Type 'help' or 'status' in console.");
 }
