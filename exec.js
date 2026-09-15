@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Load root .env
 const envPath = path.join(__dirname, ".env");
+const systemEnv = { ...process.env };
 if (fs.existsSync(envPath) && typeof process.loadEnvFile === "function") {
     process.loadEnvFile(envPath);
 }
@@ -46,7 +47,7 @@ const child = spawn(command, {
     stdio: "inherit",
     shell: true,
     env: {
-        ...process.env,
+        ...systemEnv,
         // Inherit subfolder .env if it exists
         ...(fs.existsSync(path.join(targetDir, ".env")) ? {} : {})
     }

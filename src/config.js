@@ -3,6 +3,8 @@ import path from "path";
 import { ROOT_DIR } from "./utils.js";
 import { logError } from "./logger.js";
 
+export const systemEnv = { ...process.env };
+
 export const CONFIG_PATH = path.join(ROOT_DIR, "services.json");
 
 export function loadEnv() {

@@ -4,7 +4,7 @@ import fs from "fs";
 import { ROOT_DIR } from "./utils.js";
 import { log, logError } from "./logger.js";
 import { appConfig, setAppConfig, serviceRegistry, shuttingDown } from "./state.js";
-import { loadConfig, CONFIG_PATH } from "./config.js";
+import { loadConfig, CONFIG_PATH, systemEnv } from "./config.js";
 
 export function getServiceEntryPoint(serviceDir) {
     const packageJsonPath = path.join(serviceDir, "package.json");
@@ -100,7 +100,7 @@ export function startService(name, isManual = false) {
     log("START", name, `Launching ${entryPoint}`);
 
     const childEnv = {
-        ...process.env,
+        ...systemEnv,
         BOT_NAME: name,
         ...(conf.port ? { PORT: String(conf.port) } : {})
     };
