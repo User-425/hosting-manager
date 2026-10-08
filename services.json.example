@@ -2,6 +2,8 @@
   "settings": {
     "publicPort": 25575,
     "runner": "builtin",
+    "terminalEnabled": true,
+    "terminalPath": "/terminal",
     "restartDelayMs": 3000,
     "maxCrashCount": 5,
     "crashWindowMs": 60000,

@@ -1,7 +1,7 @@
 # Hosting Manager
 One server, multiple apps. Run all your Node.js services under a single entry instance.
 
-A multi-bot and service manager with a dynamic reverse proxy gateway, hybrid process runners (Built-in Supervisor & PM2), automatic crash recovery, live configuration watching, and interactive CLI management.
+A multi-bot and service manager with a dynamic reverse proxy gateway, hybrid process runners (Built-in Supervisor & PM2), interactive Web Terminal (`/terminal`), automatic crash recovery, live configuration watching, and interactive CLI management.
 
 ![Hosting Manager Preview](docs/preview.png)
 
@@ -15,6 +15,7 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
 
 - **Multiple Applications on One Instance**: Run multiple independent bots, webhooks, and APIs concurrently in isolated processes under a single root command.
 - **Hybrid Process Runners**: Choose between the zero-dependency built-in child process supervisor or native **PM2** process management (`pm2 start <entryPoint> --name <name>`) per service or globally.
+- **Interactive Web Terminal (`/terminal`)**: Control and monitor your server directly through a web-based terminal interface with real-time status and command auto-completion.
 - **Single Public Port Routing**: Route incoming HTTP and WebSocket traffic (e.g., `/api`, `/dashboard`, `/bot`) to different internal services using the integrated reverse proxy gateway.
 - **Process Isolation and Self-Healing**: If one service crashes, other services remain uninterrupted while the circuit breaker or PM2 manages automatic retries.
 - **Zero-Downtime Configuration**: Add, enable, or disable services dynamically by editing `services.json`—the file watcher updates processes without restarting the host.
@@ -25,6 +26,7 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
 ## Features
 
 - **Hybrid Process Runners (Builtin & PM2)**: Seamlessly run services using either Node's built-in process supervisor or PM2 (`pm2 start <entryPoint> --name <name>`), automatically auto-detecting system `pm2` or falling back to `npx pm2`.
+- **Interactive Web Terminal (`/terminal`)**: Full-featured web-based command console protected by your `ADMIN_SECRET`, supporting command history, quick action chips, and real-time execution.
 - **Dynamic Reverse Proxy Gateway**: Built-in HTTP and WebSocket proxying (`http-proxy`) with route-based request dispatching to backend services.
 - **Resilience and Circuit Breaking**: Automatic crash recovery with exponential backoff and circuit breaking for built-in services, plus native PM2 crash supervision.
 - **Live State Synchronization**: Direct `pm2 jlist` integration to reflect real-time PIDs, memory consumption, uptime, and restart counts.
@@ -32,7 +34,7 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
 - **Interactive REPL Console**: Built-in CLI with live status tables, logs inspection, and commands to start, stop, restart, install, and build individual services.
 - **RESTful Management API**: Endpoints (`/_health`, `/_status`, `/_manage`) for remote monitoring, health checks, log retrieval, and service orchestration.
 - **Automated Dependency and Build Pipeline**: Automatically triggers `npm install` / `npm ci` and `npm run build` on startup or on demand, including nested sub-projects.
-- **Entry Point Resolution**: Automatically detects entry points via `package.json` (`main`), `src/index.js`, `dist/`, `bundle.cjs`, or root `index.js`, with optional manual overrides.
+- **Entry Point Resolution**: Automatically detects entry points via `package.json` (`main`), `src/index.js`, `dist/`, `bundle.cjs`, or root `index.js`, with support for global binaries and scripts.
 
 ---
 
@@ -45,12 +47,12 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
                           └─────────────┬─────────────┘
                                         │
            ┌────────────────────────────┼────────────────────────────┐
-           │ Routes: /api, /service-a   │ Routes: /                  │ Background / Non-routed
+           │ Routes: /api, /service-a   │ Routes: /                  │ Built-in Management
            ▼                            ▼                            ▼
    ┌───────────────┐            ┌───────────────┐            ┌───────────────┐
-   │   Service A   │            │   Service B   │            │   Worker /    │
-   │  (Port 8003)  │            │  (Port 8004)  │            │   Bot Service │
-   │  Runner: PM2  │            │Runner: Builtin│            │  Runner: PM2  │
+   │   Service A   │            │   Service B   │            │ Web Terminal  │
+   │  (Port 8003)  │            │  (Port 8004)  │            │  (/terminal)  │
+   │  Runner: PM2  │            │Runner: Builtin│            │  & Admin API  │
    └───────────────┘            └───────────────┘            └───────────────┘
 ```
 
@@ -88,14 +90,18 @@ Configuration variables:
 PORT=8000
 ADMIN_SECRET=your_super_secret_admin_key
 NODE_ENV=production
+TERMINAL_ENABLED=true
+TERMINAL_PATH=/terminal
 ```
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `PORT` | Public port the reverse proxy gateway listens on | `25575` |
-| `ADMIN_SECRET` | Secret token used to authenticate Admin API endpoints | `hosting_admin_key` |
+| `ADMIN_SECRET` | Secret token used to authenticate Admin API and Web Terminal | `hosting_admin_key` |
 | `NODE_ENV` | Environment mode (`production` or `development`) | `development` |
 | `PM2_CMD` | Custom PM2 executable command / path | Auto-detected (`pm2` or `npx pm2`) |
+| `TERMINAL_ENABLED` | Enable or disable the interactive web terminal | `true` |
+| `TERMINAL_PATH` | Public route for the web terminal | `/terminal` |
 | `NTFY_ENABLED` | Enable or disable the ntfy integration | `true` |
 | `NTFY_TOPIC` | Ntfy topic to listen to for incoming remote commands | - |
 | `NTFY_SERVER` | Custom ntfy server URL | `https://ntfy.sh` |
@@ -119,6 +125,8 @@ Example configuration:
   "settings": {
     "publicPort": 25575,
     "runner": "builtin",
+    "terminalEnabled": true,
+    "terminalPath": "/terminal",
     "restartDelayMs": 3000,
     "maxCrashCount": 5,
     "crashWindowMs": 60000,
@@ -142,6 +150,13 @@ Example configuration:
         }
       ]
     },
+    "pm2-dashboard": {
+      "runner": "pm2",
+      "script": "$(which pm2-dashboard)",
+      "enabled": true,
+      "port": 3000,
+      "routes": ["/dashboard"]
+    },
     "ndfy": {
       "runner": "builtin",
       "enabled": true,
@@ -149,12 +164,6 @@ Example configuration:
       "routes": ["/ndfy", "/ntfy"],
       "install": true,
       "build": true
-    },
-    "discord-assistant": {
-      "runner": "builtin",
-      "enabled": true,
-      "install": true,
-      "build": false
     }
   }
 }
@@ -164,6 +173,8 @@ Example configuration:
 
 - `settings.publicPort` *(number)*: Default gateway port (overridden by `process.env.PORT` if set).
 - `settings.runner` *(string)*: Global default process runner (`"builtin"` or `"pm2"`). Defaults to `"builtin"`.
+- `settings.terminalEnabled` *(boolean)*: Enable the interactive Web Terminal (`/terminal`). Defaults to `true`.
+- `settings.terminalPath` *(string)*: Public path prefix for Web Terminal. Defaults to `"/terminal"`.
 - `settings.pm2Path` *(string, optional)*: Explicit path or command for PM2 binary.
 - `settings.restartDelayMs` *(number)*: Base delay (in milliseconds) before restarting a crashed service (builtin runner).
 - `settings.maxCrashCount` *(number)*: Maximum allowed consecutive crashes before triggering circuit breaker (builtin runner).
@@ -179,8 +190,9 @@ Example configuration:
 #### Service Definition Schema
 
 - `runner` *(string, optional)*: Process runner for this specific service (`"builtin"` or `"pm2"`). Inherits `settings.runner` if omitted.
+- `script` / `entryPoint` *(string, optional)*: File path, global binary name, or shell command to execute.
 - `pm2Args` *(string[], optional)*: Additional flags passed when launching via PM2 (e.g., `["--max-memory-restart", "200M"]`).
-- `entryPoint` *(string, optional)*: Explicit entry file path relative to service folder (auto-detected if omitted).
+- `cwd` *(string, optional)*: Custom working directory relative to root.
 - `enabled` *(boolean)*: Whether the service should be started on launch.
 - `port` *(number, optional)*: Internal port assigned to the service (exposed as `PORT` env var to the child process).
 - `routes` *(string[], optional)*: Path prefixes mapped by the reverse proxy to this service.
@@ -190,13 +202,14 @@ Example configuration:
 
 ---
 
-## Running the Manager
+## Interactive Web Terminal (`/terminal`)
 
-Start the manager process:
+Hosting Manager provides a responsive, web-based interactive terminal at `http://localhost:25575/terminal` (or your configured `terminalPath`):
 
-```bash
-npm start
-```
+- **Zero-setup Web UI**: Open the route in any browser, enter your `ADMIN_SECRET` once, and interact with the server.
+- **Full CLI Command Parity**: Execute `status`, `restart <service>`, `logs <service>`, `reload`, `exec <cmd>`, etc.
+- **Command History**: Navigate previous commands using `Up` and `Down` arrow keys.
+- **Quick Action Chips**: One-click buttons to inspect status, restart all, reload, or view help.
 
 ---
 

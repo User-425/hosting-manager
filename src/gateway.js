@@ -2,6 +2,7 @@ import http from "http";
 import httpProxy from "http-proxy";
 import { appConfig, getAdminSecret } from "./state.js";
 import { handleAdminApi } from "./admin-api.js";
+import { handleTerminalRequest } from "./terminal.js";
 
 export function startGateway(publicPort) {
     const proxy = httpProxy.createProxyServer({ ws: true });
@@ -57,6 +58,18 @@ export function startGateway(publicPort) {
             return;
         }
 
+        const terminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
+        const terminalEnabled =
+            appConfig.settings?.terminalEnabled !== undefined
+                ? !!appConfig.settings.terminalEnabled
+                : process.env.TERMINAL_ENABLED !== "false";
+
+        const normalizedUrl = req.url.split("?")[0];
+        if (terminalEnabled && (normalizedUrl === terminalPath || normalizedUrl.startsWith(`${terminalPath}/`))) {
+            handleTerminalRequest(req, res, terminalPath);
+            return;
+        }
+
         const target = resolveTarget(req.url);
         if (target) {
             proxy.web(req, res, { target });
@@ -76,9 +89,11 @@ export function startGateway(publicPort) {
     });
 
     server.listen(publicPort, () => {
+        const terminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
         console.log("\n========================================================");
         console.log(` [GATEWAY ONLINE] Listening on public port ${publicPort}`);
-        console.log(` -> Admin Secret: ${getAdminSecret()}`);
+        console.log(` -> Web Terminal : http://localhost:${publicPort}${terminalPath}`);
+        console.log(` -> Admin Secret : ${getAdminSecret()}`);
         console.log("========================================================\n");
     });
 

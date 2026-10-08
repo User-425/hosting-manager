@@ -29,7 +29,33 @@ function getProcessMemory(pid) {
   }
 }
 
-export async function processCommand(inputStr) {
+export function formatTable(data) {
+  if (!Array.isArray(data) || data.length === 0) return "No data to display.";
+  const columns = Object.keys(data[0]);
+  const colWidths = {};
+  for (const col of columns) {
+    colWidths[col] = col.length;
+  }
+  for (const row of data) {
+    for (const col of columns) {
+      const valStr = String(row[col] ?? "");
+      colWidths[col] = Math.max(colWidths[col], valStr.length);
+    }
+  }
+
+  const topBorder = "┌─" + columns.map((c) => "─".repeat(colWidths[c])).join("─┬─") + "─┐";
+  const midBorder = "├─" + columns.map((c) => "─".repeat(colWidths[c])).join("─┼─") + "─┤";
+  const botBorder = "└─" + columns.map((c) => "─".repeat(colWidths[c])).join("─┴─") + "─┘";
+
+  const headerRow = "│ " + columns.map((c) => c.padEnd(colWidths[c])).join(" │ ") + " │";
+  const rows = data.map((row) => {
+    return "│ " + columns.map((c) => String(row[c] ?? "").padEnd(colWidths[c])).join(" │ ") + " │";
+  });
+
+  return [topBorder, headerRow, midBorder, ...rows, botBorder].join("\n");
+}
+
+export async function executeCommand(inputStr, logFn = console.log, errFn = console.error) {
   const input = inputStr.trim();
   if (!input) return;
 
@@ -75,33 +101,39 @@ export async function processCommand(inputStr) {
           Crashes: state?.restartCount || 0,
         });
       }
-      console.table(tableData);
+
+      if (logFn === console.log) {
+        console.table(tableData);
+      } else {
+        logFn(formatTable(tableData));
+      }
       break;
     }
 
     case "restart": {
       if (!target) {
-        console.log("Usage: restart <service-name> (or 'restart all')");
+        logFn("Usage: restart <service-name> (or 'restart all')");
         break;
       }
       if (target === "all") {
-        console.log("Restarting all enabled services...");
+        logFn("Restarting all enabled services...");
         for (const name of Object.keys(appConfig.services)) {
           restartService(name);
         }
       } else {
         restartService(target);
+        logFn(`Restart triggered for service "${target}".`);
       }
       break;
     }
 
     case "start": {
       if (!target) {
-        console.log("Usage: start <service-name> (or 'start all')");
+        logFn("Usage: start <service-name> (or 'start all')");
         break;
       }
       if (target === "all") {
-        console.log("Starting all enabled services...");
+        logFn("Starting all enabled services...");
         for (const [name, conf] of Object.entries(appConfig.services)) {
           if (conf.enabled) {
             startService(name, true);
@@ -109,22 +141,24 @@ export async function processCommand(inputStr) {
         }
       } else {
         startService(target, true);
+        logFn(`Start triggered for service "${target}".`);
       }
       break;
     }
 
     case "stop": {
       if (!target) {
-        console.log("Usage: stop <service-name> (or 'stop all')");
+        logFn("Usage: stop <service-name> (or 'stop all')");
         break;
       }
       if (target === "all") {
-        console.log("Stopping all services...");
+        logFn("Stopping all services...");
         for (const name of serviceRegistry.keys()) {
           stopService(name);
         }
       } else {
         stopService(target);
+        logFn(`Stop triggered for service "${target}".`);
       }
       break;
     }
@@ -132,14 +166,14 @@ export async function processCommand(inputStr) {
     case "logs":
     case "log": {
       if (!target) {
-        console.log("Usage: logs <service-name> [lines]");
+        logFn("Usage: logs <service-name> [lines]");
         break;
       }
 
       const conf = appConfig.services[target];
       const state = serviceRegistry.get(target);
       if (!conf && !state) {
-        console.log(`[LOGS ERROR] Service "${target}" not found.`);
+        logFn(`[LOGS ERROR] Service "${target}" not found.`);
         break;
       }
 
@@ -147,23 +181,24 @@ export async function processCommand(inputStr) {
       const lines = Number(args[1]) || 50;
 
       if (runner === "pm2") {
-        console.log(`\n--- PM2 Logs: ${target} (Last ${lines} lines) ---`);
-        console.log(pm2GetLogs(target, lines));
-        console.log(`---------------------------------------------------\n`);
+        logFn(`\n--- PM2 Logs: ${target} (Last ${lines} lines) ---`);
+        logFn(pm2GetLogs(target, lines));
+        logFn(`---------------------------------------------------\n`);
       } else {
-        console.log(`[LOGS] Service "${target}" runs on the builtin runner. Its logs stream live directly to this console.`);
+        logFn(`[LOGS] Service "${target}" runs on the builtin runner. Its logs stream live directly to host stdout.`);
       }
       break;
     }
 
     case "reload": {
       await reloadConfig();
+      logFn("[CONFIG] Reload complete.");
       break;
     }
 
     case "install": {
       if (!target) {
-        console.log("Usage: install <service-name>");
+        logFn("Usage: install <service-name>");
         break;
       }
       const conf = appConfig.services[target];
@@ -173,12 +208,13 @@ export async function processCommand(inputStr) {
           if (sub.install) installDependencies(target, sub.path, sub.build);
         }
       }
+      logFn(`[INSTALL] Dependency installation finished for "${target}".`);
       break;
     }
 
     case "build": {
       if (!target) {
-        console.log("Usage: build <service-name>");
+        logFn("Usage: build <service-name>");
         break;
       }
       const conf = appConfig.services[target];
@@ -188,47 +224,49 @@ export async function processCommand(inputStr) {
           if (sub.build) buildPackage(target, sub.path);
         }
       }
+      logFn(`[BUILD] Build finished for "${target}".`);
       break;
     }
 
     case "exec":
     case "cmd": {
       if (args.length < 2) {
-        console.log("Usage: exec <service-name | .> <command...>");
-        console.log("Example: exec discord-bot npm test");
-        console.log("Example: exec . curl http://localhost:25575/_health");
+        logFn("Usage: exec <service-name | .> <command...>");
+        logFn("Example: exec discord-bot npm test");
+        logFn("Example: exec . curl http://localhost:25575/_health");
         break;
       }
 
-      const targetDir =
-        target === "." ? ROOT_DIR : path.resolve(ROOT_DIR, target);
+      const targetDir = target === "." ? ROOT_DIR : path.resolve(ROOT_DIR, target);
       const rawCmd = args.slice(1).join(" ");
 
       if (!fs.existsSync(targetDir)) {
-        console.log(`[EXEC ERROR] Directory "${targetDir}" does not exist.`);
+        logFn(`[EXEC ERROR] Directory "${targetDir}" does not exist.`);
         break;
       }
 
-      console.log(`\n[Directory]: ${targetDir}`);
-      console.log(`[Running]  : ${rawCmd}\n`);
+      logFn(`[Directory]: ${targetDir}`);
+      logFn(`[Running]  : ${rawCmd}\n`);
 
       const res = spawnSync(rawCmd, {
         cwd: targetDir,
-        stdio: "inherit",
+        stdio: "pipe",
         shell: true,
         env: process.env,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024
       });
 
-      if (res.error) {
-        console.error(`[EXEC ERROR]: ${res.error.message}`);
-      }
+      if (res.stdout) logFn(res.stdout);
+      if (res.stderr) errFn(res.stderr);
+      if (res.error) errFn(`[EXEC ERROR]: ${res.error.message}`);
       break;
     }
 
     case "ntfy": {
       if (args.length < 2) {
-        console.log("Usage: ntfy <topic> <message...>");
-        console.log("Example: ntfy my_alerts Server is starting!");
+        logFn("Usage: ntfy <topic> <message...>");
+        logFn("Example: ntfy my_alerts Server is starting!");
         break;
       }
       const ntfyTopic = args[0];
@@ -255,28 +293,28 @@ export async function processCommand(inputStr) {
           headers,
         });
         if (response.ok) {
-          console.log(
-            `[NTFY] Notification sent to topic "${ntfyTopic}" successfully.`,
-          );
+          logFn(`[NTFY] Notification sent to topic "${ntfyTopic}" successfully.`);
         } else {
-          console.error(
-            `[NTFY ERROR] Failed to send notification: ${response.status} ${response.statusText}`,
-          );
+          errFn(`[NTFY ERROR] Failed to send notification: ${response.status} ${response.statusText}`);
         }
       } catch (err) {
-        console.error(`[NTFY ERROR] Exception: ${err.message}`);
+        errFn(`[NTFY ERROR] Exception: ${err.message}`);
       }
       break;
     }
 
     case "clear":
     case "cls": {
-      console.clear();
+      if (logFn === console.log) {
+        console.clear();
+      } else {
+        logFn("__CLEAR__");
+      }
       break;
     }
 
     case "help": {
-      console.log(`
+      logFn(`
 ┌─────────────────────────────────────────────────────────────┐
 │                 HOSTING MANAGER CLI COMMANDS                │
 ├─────────────────────────────────────────────────────────────┤
@@ -292,16 +330,18 @@ export async function processCommand(inputStr) {
 │  clear | cls        - Clear the console screen              │
 │  help               - Display this help menu                │
 └─────────────────────────────────────────────────────────────┘
-            `);
+      `);
       break;
     }
 
     default:
-      console.log(
-        `Unknown command: "${command}". Type "help" for a list of commands.`,
-      );
+      logFn(`Unknown command: "${command}". Type "help" for a list of commands.`);
       break;
   }
+}
+
+export async function processCommand(inputStr) {
+  return executeCommand(inputStr, console.log, console.error);
 }
 
 export function setupConsoleCLI() {
