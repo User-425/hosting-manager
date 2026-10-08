@@ -59,7 +59,7 @@ export function getTerminalStateSummary() {
  */
 export async function handleTerminalRequest(req, res, terminalPath = "/terminal") {
     const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-    const pathname = parsedUrl.pathname;
+    const pathname = (parsedUrl.pathname || "").replace(/\/+$/, "") || "/";
     const token =
         parsedUrl.searchParams.get("key") ||
         req.headers["x-admin-key"] ||
@@ -67,7 +67,8 @@ export async function handleTerminalRequest(req, res, terminalPath = "/terminal"
             ? req.headers["authorization"].slice(7).trim()
             : null);
 
-    const apiPrefix = `${terminalPath}/api`;
+    const cleanTerminalPath = (terminalPath.startsWith("/") ? terminalPath : `/${terminalPath}`).replace(/\/+$/, "");
+    const apiPrefix = `${cleanTerminalPath}/api`;
 
     // 1. API: Auth Check
     if (pathname === `${apiPrefix}/auth-check`) {
@@ -133,10 +134,10 @@ export async function handleTerminalRequest(req, res, terminalPath = "/terminal"
         return;
     }
 
-    // 4. Web UI Page: GET /terminal
-    if (pathname === terminalPath || pathname === `${terminalPath}/`) {
+    // 4. Web UI Page: GET /terminal (or any sub-route under cleanTerminalPath)
+    if (pathname === cleanTerminalPath || pathname === `${cleanTerminalPath}/` || pathname.startsWith(`${cleanTerminalPath}`)) {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(getTerminalHtml(terminalPath));
+        res.end(getTerminalHtml(cleanTerminalPath));
         return;
     }
 

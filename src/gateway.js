@@ -58,15 +58,18 @@ export function startGateway(publicPort) {
             return;
         }
 
-        const terminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
+        const rawTerminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
+        const cleanTerminalPath = rawTerminalPath.startsWith("/") ? rawTerminalPath.replace(/\/+$/, "") : `/${rawTerminalPath.replace(/\/+$/, "")}`;
+
         const terminalEnabled =
             appConfig.settings?.terminalEnabled !== undefined
                 ? !!appConfig.settings.terminalEnabled
                 : process.env.TERMINAL_ENABLED !== "false";
 
-        const normalizedUrl = req.url.split("?")[0];
-        if (terminalEnabled && (normalizedUrl === terminalPath || normalizedUrl.startsWith(`${terminalPath}/`))) {
-            handleTerminalRequest(req, res, terminalPath);
+        const normalizedUrl = (req.url.split("?")[0] || "").replace(/\/+$/, "");
+
+        if (terminalEnabled && (normalizedUrl === cleanTerminalPath || normalizedUrl.startsWith(`${cleanTerminalPath}/`))) {
+            handleTerminalRequest(req, res, cleanTerminalPath);
             return;
         }
 
@@ -89,10 +92,11 @@ export function startGateway(publicPort) {
     });
 
     server.listen(publicPort, () => {
-        const terminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
+        const rawTerminalPath = appConfig.settings?.terminalPath || process.env.TERMINAL_PATH || "/terminal";
+        const cleanTerminalPath = rawTerminalPath.startsWith("/") ? rawTerminalPath.replace(/\/+$/, "") : `/${rawTerminalPath.replace(/\/+$/, "")}`;
         console.log("\n========================================================");
         console.log(` [GATEWAY ONLINE] Listening on public port ${publicPort}`);
-        console.log(` -> Web Terminal : http://localhost:${publicPort}${terminalPath}`);
+        console.log(` -> Web Terminal : http://localhost:${publicPort}${cleanTerminalPath}`);
         console.log(` -> Admin Secret : ${getAdminSecret()}`);
         console.log("========================================================\n");
     });

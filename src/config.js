@@ -5,7 +5,15 @@ import { logError } from "./logger.js";
 
 export const systemEnv = { ...process.env };
 
-export const CONFIG_PATH = path.join(ROOT_DIR, "services.json");
+export function getResolvedConfigPath() {
+    const plural = path.join(ROOT_DIR, "services.json");
+    const singular = path.join(ROOT_DIR, "service.json");
+    if (fs.existsSync(plural)) return plural;
+    if (fs.existsSync(singular)) return singular;
+    return plural;
+}
+
+export const CONFIG_PATH = getResolvedConfigPath();
 
 export function loadEnv() {
     const envPath = path.join(ROOT_DIR, ".env");
@@ -37,20 +45,21 @@ export function loadEnv() {
 }
 
 export function loadConfig() {
-    if (!fs.existsSync(CONFIG_PATH)) {
-        logError("CONFIG", "SYSTEM", `Configuration file not found at ${CONFIG_PATH}`);
+    const resolvedPath = getResolvedConfigPath();
+    if (!fs.existsSync(resolvedPath)) {
+        logError("CONFIG", "SYSTEM", `Configuration file not found at ${resolvedPath}`);
         return null;
     }
 
     try {
-        const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+        const raw = fs.readFileSync(resolvedPath, "utf-8");
         const parsed = JSON.parse(raw);
         if (!parsed.services || typeof parsed.services !== "object") {
             throw new Error("Invalid config format: 'services' object is missing.");
         }
         return parsed;
     } catch (err) {
-        logError("CONFIG", "SYSTEM", `Failed to read or parse services.json: ${err.message}`);
+        logError("CONFIG", "SYSTEM", `Failed to read or parse configuration (${resolvedPath}): ${err.message}`);
         return null;
     }
 }
