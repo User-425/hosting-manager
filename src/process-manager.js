@@ -5,8 +5,11 @@ import { ROOT_DIR } from "./utils.js";
 import { log, logError } from "./logger.js";
 import { appConfig, setAppConfig, serviceRegistry, shuttingDown } from "./state.js";
 import { loadConfig, CONFIG_PATH, systemEnv } from "./config.js";
+import { pm2Start, pm2Stop, pm2Restart, pm2Delete, pm2GetProcessList } from "./pm2-manager.js";
 
 export function getServiceEntryPoint(serviceDir) {
+    if (!fs.existsSync(serviceDir)) return null;
+
     const packageJsonPath = path.join(serviceDir, "package.json");
     if (fs.existsSync(packageJsonPath)) {
         try {
@@ -34,20 +37,63 @@ export function getServiceEntryPoint(serviceDir) {
 export function getOrCreateServiceState(name) {
     let state = serviceRegistry.get(name);
     if (!state) {
+        const conf = appConfig.services[name] || {};
         state = {
             child: null,
             status: "STOPPED",
+            runner: conf.runner || appConfig.settings?.runner || "builtin",
+            pid: null,
+            memory: null,
             startTime: null,
             restartCount: 0,
             lastCrashTime: 0,
-            backoffDelay: appConfig.settings.restartDelayMs || 3000,
+            backoffDelay: appConfig.settings?.restartDelayMs || 3000,
             restartTimer: null,
-            port: appConfig.services[name]?.port || null,
-            routes: appConfig.services[name]?.routes || []
+            port: conf.port || null,
+            routes: conf.routes || []
         };
         serviceRegistry.set(name, state);
     }
     return state;
+}
+
+/**
+ * Synchronizes live state from PM2 (`pm2 jlist`) into the service registry for all PM2-backed services.
+ */
+export function syncPm2Status() {
+    const list = pm2GetProcessList();
+    const pm2Map = new Map(list.map((p) => [p.name, p]));
+
+    for (const [name, state] of serviceRegistry.entries()) {
+        const conf = appConfig.services[name];
+        const runner = state.runner || conf?.runner || appConfig.settings?.runner || "builtin";
+        if (runner !== "pm2") continue;
+
+        state.runner = "pm2";
+        const proc = pm2Map.get(name);
+        if (proc) {
+            state.pid = proc.pid || null;
+            state.restartCount = proc.pm2_env?.restart_time || 0;
+            state.startTime = proc.pm2_env?.pm_uptime || state.startTime;
+            state.memory = proc.monit?.memory ? proc.monit.memory / (1024 * 1024) : null;
+
+            const pm2Status = proc.pm2_env?.status;
+            if (pm2Status === "online") {
+                state.status = "RUNNING";
+            } else if (pm2Status === "launching") {
+                state.status = "STARTING";
+            } else if (pm2Status === "stopping" || pm2Status === "stopped") {
+                state.status = "STOPPED";
+            } else if (pm2Status === "errored") {
+                state.status = "CRASHED";
+            } else {
+                state.status = pm2Status ? pm2Status.toUpperCase() : "STOPPED";
+            }
+        } else if (state.status === "RUNNING") {
+            state.status = "STOPPED";
+            state.pid = null;
+        }
+    }
 }
 
 export function startService(name, isManual = false) {
@@ -63,15 +109,18 @@ export function startService(name, isManual = false) {
         return;
     }
 
+    const runner = conf.runner || appConfig.settings?.runner || "builtin";
     const state = getOrCreateServiceState(name);
-    if (state.status === "RUNNING" && state.child) {
+    state.runner = runner;
+
+    if (runner === "builtin" && state.status === "RUNNING" && state.child) {
         log("WARN", name, `Service "${name}" is already running (PID ${state.child.pid}).`);
         return;
     }
 
     if (isManual) {
         state.restartCount = 0;
-        state.backoffDelay = appConfig.settings.restartDelayMs || 3000;
+        state.backoffDelay = appConfig.settings?.restartDelayMs || 3000;
     }
 
     if (state.restartTimer) {
@@ -79,31 +128,67 @@ export function startService(name, isManual = false) {
         state.restartTimer = null;
     }
 
-    const serviceFolder = path.join(ROOT_DIR, name);
-    if (!fs.existsSync(serviceFolder)) {
-        logError("START", name, `Directory "${serviceFolder}" does not exist.`);
+    const customCwd = conf.cwd ? path.resolve(ROOT_DIR, conf.cwd) : null;
+    const localFolder = path.join(ROOT_DIR, name);
+    const serviceFolder = customCwd || (fs.existsSync(localFolder) ? localFolder : ROOT_DIR);
+
+    if (customCwd && !fs.existsSync(customCwd)) {
+        logError("START", name, `Configured working directory "${customCwd}" does not exist.`);
         state.status = "STOPPED";
         return;
     }
 
-    const entryPoint = getServiceEntryPoint(serviceFolder);
+    let entryPoint = conf.script || conf.entryPoint || conf.command || null;
+    if (entryPoint) {
+        const potentialPath = path.resolve(serviceFolder, entryPoint);
+        if (fs.existsSync(potentialPath)) {
+            entryPoint = potentialPath;
+        }
+    } else {
+        entryPoint = getServiceEntryPoint(serviceFolder);
+        if (!entryPoint && runner === "pm2") {
+            // For PM2 global binaries/tools, fallback to the service name itself
+            entryPoint = name;
+        }
+    }
+
     if (!entryPoint) {
         logError("START", name, `No valid entry point found (checked package.json main, src/index.js, index.js, dist/).`);
         state.status = "STOPPED";
         return;
     }
 
-    state.status = "STARTING";
+    if (runner === "builtin" && !fs.existsSync(entryPoint)) {
+        logError("START", name, `Entry point "${entryPoint}" does not exist on disk.`);
+        state.status = "STOPPED";
+        return;
+    }
+
     state.port = conf.port || null;
     state.routes = conf.routes || [];
-
-    log("START", name, `Launching ${entryPoint}`);
 
     const childEnv = {
         ...systemEnv,
         BOT_NAME: name,
         ...(conf.port ? { PORT: String(conf.port) } : {})
     };
+
+    if (runner === "pm2") {
+        state.status = "STARTING";
+        const res = pm2Start(name, entryPoint, serviceFolder, childEnv, conf.pm2Args || []);
+        if (res.success) {
+            state.status = "RUNNING";
+            state.startTime = Date.now();
+            syncPm2Status();
+        } else {
+            state.status = "STOPPED";
+        }
+        return;
+    }
+
+    // Builtin runner
+    state.status = "STARTING";
+    log("START", name, `Launching ${entryPoint} (Runner: builtin)`);
 
     const child = spawn(process.execPath, [entryPoint], {
         cwd: serviceFolder,
@@ -174,6 +259,22 @@ export function startService(name, isManual = false) {
 
 export function stopService(name) {
     const state = serviceRegistry.get(name);
+    const conf = appConfig.services[name];
+    const runner = state?.runner || conf?.runner || appConfig.settings?.runner || "builtin";
+
+    if (runner === "pm2") {
+        if (state?.restartTimer) {
+            clearTimeout(state.restartTimer);
+            state.restartTimer = null;
+        }
+        pm2Stop(name);
+        if (state) {
+            state.status = "STOPPED";
+            state.pid = null;
+        }
+        return;
+    }
+
     if (!state || (!state.child && !state.restartTimer)) {
         log("INFO", name, "Service is not currently running or scheduled to restart.");
         return;
@@ -206,13 +307,33 @@ export function stopService(name) {
 }
 
 export function restartService(name) {
-    log("RESTART", name, `Restart requested for "${name}"`);
+    const state = serviceRegistry.get(name);
+    const conf = appConfig.services[name];
+    const runner = state?.runner || conf?.runner || appConfig.settings?.runner || "builtin";
+
+    log("RESTART", name, `Restart requested for "${name}" (Runner: ${runner})`);
+
+    if (runner === "pm2") {
+        const childEnv = {
+            ...systemEnv,
+            BOT_NAME: name,
+            ...(conf?.port ? { PORT: String(conf.port) } : {})
+        };
+        pm2Restart(name, childEnv);
+        if (state) {
+            state.restartCount = 0;
+            state.status = "RUNNING";
+            state.startTime = Date.now();
+        }
+        syncPm2Status();
+        return;
+    }
+
     stopService(name);
 
-    const state = serviceRegistry.get(name);
     if (state) {
         state.restartCount = 0;
-        state.backoffDelay = appConfig.settings.restartDelayMs || 3000;
+        state.backoffDelay = appConfig.settings?.restartDelayMs || 3000;
     }
 
     setTimeout(() => {
@@ -232,9 +353,12 @@ export async function reloadConfig() {
 
     for (const [name, conf] of Object.entries(appConfig.services)) {
         const state = serviceRegistry.get(name);
+        const runner = conf.runner || appConfig.settings?.runner || "builtin";
+        if (state) state.runner = runner;
+
         if (conf.enabled) {
             if (!state || state.status === "STOPPED") {
-                log("CONFIG", name, "Starting enabled service...");
+                log("CONFIG", name, `Starting enabled service (Runner: ${runner})...`);
                 startService(name);
             } else {
                 state.port = conf.port || null;
@@ -247,9 +371,14 @@ export async function reloadConfig() {
     }
 
     for (const [name, state] of serviceRegistry) {
-        if (!appConfig.services[name] && (state.status === "RUNNING" || state.status === "STARTING" || state.child || state.restartTimer)) {
-            log("CONFIG", name, "Service was removed from configuration. Stopping...");
-            stopService(name);
+        if (!appConfig.services[name]) {
+            if (state.status === "RUNNING" || state.status === "STARTING" || state.child || state.restartTimer) {
+                log("CONFIG", name, "Service was removed from configuration. Stopping...");
+                stopService(name);
+            }
+            if (state.runner === "pm2") {
+                pm2Delete(name);
+            }
         }
     }
 

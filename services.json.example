@@ -1,6 +1,7 @@
 {
   "settings": {
     "publicPort": 25575,
+    "runner": "builtin",
     "restartDelayMs": 3000,
     "maxCrashCount": 5,
     "crashWindowMs": 60000,
@@ -16,6 +17,8 @@
   },
   "services": {
     "discord-bot": {
+      "runner": "pm2",
+      "pm2Args": ["--max-memory-restart", "300M"],
       "enabled": true,
       "port": 8004,
       "routes": ["/"],
@@ -31,6 +34,7 @@
       ]
     },
     "ndfy": {
+      "runner": "builtin",
       "enabled": true,
       "port": 8003,
       "routes": ["/ndfy", "/ntfy"],
@@ -38,6 +42,7 @@
       "build": true
     },
     "discord-assistant": {
+      "runner": "builtin",
       "enabled": true,
       "install": true,
       "build": false

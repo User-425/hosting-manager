@@ -1,7 +1,7 @@
 # Hosting Manager
 One server, multiple apps. Run all your Node.js services under a single entry instance.
 
-A multi-bot and service manager with a dynamic reverse proxy gateway, automatic crash recovery, live configuration watching, and interactive CLI management.
+A multi-bot and service manager with a dynamic reverse proxy gateway, hybrid process runners (Built-in Supervisor & PM2), automatic crash recovery, live configuration watching, and interactive CLI management.
 
 ![Hosting Manager Preview](docs/preview.png)
 
@@ -11,25 +11,28 @@ A multi-bot and service manager with a dynamic reverse proxy gateway, automatic 
 
 Many budget hosting providers, PaaS platforms, and bot panels limit deployments to a **single entry point** (`npm start`) and a **single public port**. Running multiple bots, webhooks, or dashboards traditionally requires purchasing multiple hosting plans or configuring complex Nginx/Docker setups.
 
-**Hosting Manager enables your hosting environment to support multiple `index.js` applications simultaneously:**
+**Hosting Manager enables your hosting environment to support multiple applications simultaneously:**
 
-- **Multiple Applications on One Instance**: Run multiple independent bots, webhooks, and APIs concurrently in isolated child processes under a single root command.
+- **Multiple Applications on One Instance**: Run multiple independent bots, webhooks, and APIs concurrently in isolated processes under a single root command.
+- **Hybrid Process Runners**: Choose between the zero-dependency built-in child process supervisor or native **PM2** process management (`pm2 start <entryPoint> --name <name>`) per service or globally.
 - **Single Public Port Routing**: Route incoming HTTP and WebSocket traffic (e.g., `/api`, `/dashboard`, `/bot`) to different internal services using the integrated reverse proxy gateway.
-- **Process Isolation and Self-Healing**: If one service crashes, other services remain uninterrupted while the circuit breaker manages automatic retries with exponential backoff.
+- **Process Isolation and Self-Healing**: If one service crashes, other services remain uninterrupted while the circuit breaker or PM2 manages automatic retries.
 - **Zero-Downtime Configuration**: Add, enable, or disable services dynamically by editing `services.json`—the file watcher updates processes without restarting the host.
-- **Zero Configuration Overhead**: No Nginx, Docker, or PM2 configurations needed. Place your service directories in the project root and launch.
+- **Zero Configuration Overhead**: Run with standard Node.js or PM2 without complex reverse proxy servers.
 
 ---
 
 ## Features
 
+- **Hybrid Process Runners (Builtin & PM2)**: Seamlessly run services using either Node's built-in process supervisor or PM2 (`pm2 start <entryPoint> --name <name>`), automatically auto-detecting system `pm2` or falling back to `npx pm2`.
 - **Dynamic Reverse Proxy Gateway**: Built-in HTTP and WebSocket proxying (`http-proxy`) with route-based request dispatching to backend services.
-- **Resilience and Circuit Breaking**: Automatic crash recovery with exponential backoff and circuit breaking to prevent infinite restart loops on faulty processes.
+- **Resilience and Circuit Breaking**: Automatic crash recovery with exponential backoff and circuit breaking for built-in services, plus native PM2 crash supervision.
+- **Live State Synchronization**: Direct `pm2 jlist` integration to reflect real-time PIDs, memory consumption, uptime, and restart counts.
 - **Hot-Reloading and File Watcher**: Automatically detects and applies updates to `services.json` at runtime without restarting the main manager process.
-- **Interactive REPL Console**: Built-in CLI with live status tables and commands to start, stop, restart, install, and build individual services.
-- **RESTful Management API**: Endpoints (`/_health`, `/_status`, `/_manage`) for remote monitoring, health checks, and service orchestration.
+- **Interactive REPL Console**: Built-in CLI with live status tables, logs inspection, and commands to start, stop, restart, install, and build individual services.
+- **RESTful Management API**: Endpoints (`/_health`, `/_status`, `/_manage`) for remote monitoring, health checks, log retrieval, and service orchestration.
 - **Automated Dependency and Build Pipeline**: Automatically triggers `npm install` / `npm ci` and `npm run build` on startup or on demand, including nested sub-projects.
-- **Entry Point Resolution**: Automatically detects entry points via `package.json` (`main`), `src/index.js`, `dist/`, `bundle.cjs`, or root `index.js`.
+- **Entry Point Resolution**: Automatically detects entry points via `package.json` (`main`), `src/index.js`, `dist/`, `bundle.cjs`, or root `index.js`, with optional manual overrides.
 
 ---
 
@@ -47,6 +50,7 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
    ┌───────────────┐            ┌───────────────┐            ┌───────────────┐
    │   Service A   │            │   Service B   │            │   Worker /    │
    │  (Port 8003)  │            │  (Port 8004)  │            │   Bot Service │
+   │  Runner: PM2  │            │Runner: Builtin│            │  Runner: PM2  │
    └───────────────┘            └───────────────┘            └───────────────┘
 ```
 
@@ -58,6 +62,7 @@ Many budget hosting providers, PaaS platforms, and bot panels limit deployments 
 
 - Node.js v18.0.0 or higher
 - npm v9.0.0 or higher
+- *(Optional)* PM2 installed globally (`npm install -g pm2`) or available via `npx`
 
 ### 2. Installation
 
@@ -90,11 +95,14 @@ NODE_ENV=production
 | `PORT` | Public port the reverse proxy gateway listens on | `25575` |
 | `ADMIN_SECRET` | Secret token used to authenticate Admin API endpoints | `hosting_admin_key` |
 | `NODE_ENV` | Environment mode (`production` or `development`) | `development` |
+| `PM2_CMD` | Custom PM2 executable command / path | Auto-detected (`pm2` or `npx pm2`) |
 | `NTFY_ENABLED` | Enable or disable the ntfy integration | `true` |
 | `NTFY_TOPIC` | Ntfy topic to listen to for incoming remote commands | - |
 | `NTFY_SERVER` | Custom ntfy server URL | `https://ntfy.sh` |
 | `NTFY_AUTH` | Authorization header for private ntfy topics | - |
 | `NTFY_PREFIX` | Prefix required to execute a command (e.g., `!`) | `""` |
+
+---
 
 ### 4. Service Configuration (`services.json`)
 
@@ -110,6 +118,7 @@ Example configuration:
 {
   "settings": {
     "publicPort": 25575,
+    "runner": "builtin",
     "restartDelayMs": 3000,
     "maxCrashCount": 5,
     "crashWindowMs": 60000,
@@ -117,6 +126,8 @@ Example configuration:
   },
   "services": {
     "discord-bot": {
+      "runner": "pm2",
+      "pm2Args": ["--max-memory-restart", "300M"],
       "enabled": true,
       "port": 8004,
       "routes": ["/"],
@@ -132,6 +143,7 @@ Example configuration:
       ]
     },
     "ndfy": {
+      "runner": "builtin",
       "enabled": true,
       "port": 8003,
       "routes": ["/ndfy", "/ntfy"],
@@ -139,6 +151,7 @@ Example configuration:
       "build": true
     },
     "discord-assistant": {
+      "runner": "builtin",
       "enabled": true,
       "install": true,
       "build": false
@@ -150,8 +163,10 @@ Example configuration:
 #### Settings Schema
 
 - `settings.publicPort` *(number)*: Default gateway port (overridden by `process.env.PORT` if set).
-- `settings.restartDelayMs` *(number)*: Base delay (in milliseconds) before restarting a crashed service.
-- `settings.maxCrashCount` *(number)*: Maximum allowed consecutive crashes before triggering circuit breaker.
+- `settings.runner` *(string)*: Global default process runner (`"builtin"` or `"pm2"`). Defaults to `"builtin"`.
+- `settings.pm2Path` *(string, optional)*: Explicit path or command for PM2 binary.
+- `settings.restartDelayMs` *(number)*: Base delay (in milliseconds) before restarting a crashed service (builtin runner).
+- `settings.maxCrashCount` *(number)*: Maximum allowed consecutive crashes before triggering circuit breaker (builtin runner).
 - `settings.crashWindowMs` *(number)*: Window (in ms) after which crash counters reset for stable services.
 - `settings.autoWatchConfig` *(boolean)*: Automatically reload configuration when `services.json` changes.
 - `settings.ntfyEnabled` *(boolean)*: Enable or disable the ntfy listener.
@@ -163,6 +178,9 @@ Example configuration:
 
 #### Service Definition Schema
 
+- `runner` *(string, optional)*: Process runner for this specific service (`"builtin"` or `"pm2"`). Inherits `settings.runner` if omitted.
+- `pm2Args` *(string[], optional)*: Additional flags passed when launching via PM2 (e.g., `["--max-memory-restart", "200M"]`).
+- `entryPoint` *(string, optional)*: Explicit entry file path relative to service folder (auto-detected if omitted).
 - `enabled` *(boolean)*: Whether the service should be started on launch.
 - `port` *(number, optional)*: Internal port assigned to the service (exposed as `PORT` env var to the child process).
 - `routes` *(string[], optional)*: Path prefixes mapped by the reverse proxy to this service.
@@ -188,10 +206,11 @@ When run in an interactive terminal, the manager provides a command prompt:
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
-| `status` / `list` / `ls` | `status` | Displays a table of all services, their status, PID, port, uptime, and crash count. |
+| `status` / `list` / `ls` | `status` | Displays a table of all services, runner type, status, PID, memory, port, uptime, and crash count. |
 | `start` | `start <service-name>` | Manually starts a service. |
-| `stop` | `stop <service-name>` | Gracefully terminates a running service. |
+| `stop` | `stop <service-name>` | Gracefully terminates/stops a running service. |
 | `restart` | `restart <service-name \| all>` | Restarts a specific service or all enabled services. |
+| `logs` | `logs <service-name> [lines]` | Inspects recent output logs for PM2 services (default: 50 lines). |
 | `reload` | `reload` | Re-reads `services.json` and synchronizes running processes immediately. |
 | `install` | `install <service-name>` | Triggers dependency installation for the service and its sub-projects. |
 | `build` | `build <service-name>` | Triggers `npm run build` for the service and its sub-projects. |
@@ -203,7 +222,7 @@ When run in an interactive terminal, the manager provides a command prompt:
 
 ## REST Admin and Health API
 
-The gateway exposes administrative endpoints for health monitoring and remote management.
+The gateway exposes administrative endpoints for health monitoring, logs, and remote management.
 
 ### 1. Health Check (Public)
 
@@ -215,7 +234,7 @@ GET /_health
 ```json
 {
   "status": "OK",
-  "timestamp": "2026-09-07T11:00:00.000Z"
+  "timestamp": "2026-10-08T15:20:00.000Z"
 }
 ```
 
@@ -233,9 +252,11 @@ GET /_manage/status?key=YOUR_ADMIN_SECRET
   "services": [
     {
       "name": "discord-bot",
+      "runner": "pm2",
       "status": "RUNNING",
       "pid": 12345,
       "port": 8004,
+      "memoryMb": 48.2,
       "routes": ["/"],
       "uptimeSeconds": 3600,
       "restarts": 0
@@ -256,6 +277,7 @@ Supported actions:
 - `restart`: Restart the target service (`&service=<name>`).
 - `start`: Start the target service (`&service=<name>`).
 - `stop`: Stop the target service (`&service=<name>`).
+- `logs`: Fetch recent logs for the target service (`&service=<name>&lines=50`).
 
 ---
 
@@ -274,7 +296,7 @@ NTFY_AUTH=Bearer tk_your_access_token
 NTFY_PREFIX=!
 ```
 
-Alternatively, you can configure these directly in your `services.json` under `settings`:
+Alternatively, configure these directly in `services.json` under `settings`:
 ```json
   "settings": {
     "ntfyEnabled": true,
@@ -300,15 +322,13 @@ ntfy my_alerts Deploy completed successfully!
 
 ---
 
-## Crash Handling and Circuit Breaker
+## Crash Handling and Resilience
 
-- When a managed service exits unexpectedly, the manager automatically schedules a restart with exponential backoff (up to 30 seconds).
-- If a service crashes more than `maxCrashCount` times within `crashWindowMs`, the service enters `SUSPENDED` status.
-- A suspended service can be resumed using the `restart <service-name>` CLI command or via the Admin API.
+- **Built-in Runner**: When a managed service exits unexpectedly, the manager automatically schedules a restart with exponential backoff (up to 30 seconds). If a service crashes more than `maxCrashCount` times within `crashWindowMs`, the service enters `SUSPENDED` status.
+- **PM2 Runner**: PM2 natively handles automatic daemon restarts, clustering, and memory thresholds. Status and crash statistics are synchronized with the Hosting Manager via `pm2 jlist`.
 
 ---
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-

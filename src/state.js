@@ -7,6 +7,7 @@ export function setShuttingDown(val) {
 export let appConfig = {
     settings: {
         publicPort: 25575,
+        runner: "builtin",
         restartDelayMs: 3000,
         maxCrashCount: 5,
         crashWindowMs: 60000,

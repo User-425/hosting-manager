@@ -9,8 +9,10 @@ import {
   stopService,
   restartService,
   reloadConfig,
+  syncPm2Status
 } from "./process-manager.js";
 import { installDependencies, buildPackage } from "./builder.js";
+import { pm2GetLogs } from "./pm2-manager.js";
 
 function getProcessMemory(pid) {
   if (!pid || process.platform !== "linux") {
@@ -38,29 +40,36 @@ export async function processCommand(inputStr) {
     case "status":
     case "list":
     case "ls": {
+      syncPm2Status();
+
       const tableData = [];
       for (const [name, conf] of Object.entries(appConfig.services)) {
         const state = serviceRegistry.get(name);
+        const runner = state?.runner || conf.runner || appConfig.settings?.runner || "builtin";
         const isRunning = state?.status === "RUNNING";
         const uptime =
           isRunning && state?.startTime
             ? `${Math.floor((Date.now() - state.startTime) / 1000)}s`
             : "-";
 
-        const pid = state?.child?.pid;
+        const pid = state?.pid || state?.child?.pid;
+
+        let memoryStr = "-";
+        if (state?.memory !== null && state?.memory !== undefined) {
+          memoryStr = `${state.memory.toFixed(1)} MB`;
+        } else if (pid) {
+          const linuxMem = getProcessMemory(pid);
+          if (linuxMem !== null) memoryStr = `${linuxMem.toFixed(1)} MB`;
+        }
 
         tableData.push({
           Service: name,
+          Runner: runner,
           Configured: conf.enabled ? "Enabled" : "Disabled",
           Status: state?.status || "STOPPED",
           PID: pid || "-",
           Port: conf.port || "-",
-          Memory: pid
-            ? (() => {
-                const memory = getProcessMemory(pid);
-                return memory !== null ? `${memory.toFixed(1)} MB` : "-";
-              })()
-            : "-",
+          Memory: memoryStr,
           Routes: conf.routes ? conf.routes.join(", ") : "-",
           Uptime: uptime,
           Crashes: state?.restartCount || 0,
@@ -116,6 +125,33 @@ export async function processCommand(inputStr) {
         }
       } else {
         stopService(target);
+      }
+      break;
+    }
+
+    case "logs":
+    case "log": {
+      if (!target) {
+        console.log("Usage: logs <service-name> [lines]");
+        break;
+      }
+
+      const conf = appConfig.services[target];
+      const state = serviceRegistry.get(target);
+      if (!conf && !state) {
+        console.log(`[LOGS ERROR] Service "${target}" not found.`);
+        break;
+      }
+
+      const runner = state?.runner || conf?.runner || appConfig.settings?.runner || "builtin";
+      const lines = Number(args[1]) || 50;
+
+      if (runner === "pm2") {
+        console.log(`\n--- PM2 Logs: ${target} (Last ${lines} lines) ---`);
+        console.log(pm2GetLogs(target, lines));
+        console.log(`---------------------------------------------------\n`);
+      } else {
+        console.log(`[LOGS] Service "${target}" runs on the builtin runner. Its logs stream live directly to this console.`);
       }
       break;
     }
@@ -248,6 +284,7 @@ export async function processCommand(inputStr) {
 │  restart <name>     - Restart a specific service (or 'all') │
 │  start <name>       - Start an individual service (or 'all')│
 │  stop <name>        - Stop an individual service (or 'all') │
+│  logs <name> [n]    - View recent PM2 logs for a service    │
 │  reload             - Re-read services.json and apply       │
 │  install <name>     - Run npm install for a service         │
 │  build <name>       - Run npm run build for a service       │

@@ -13,7 +13,7 @@ function shutdown(signal) {
     if (shuttingDown) return;
     setShuttingDown(true);
 
-    console.log(`\n[SHUTDOWN] Received ${signal}. Terminating all child processes...`);
+    console.log(`\n[SHUTDOWN] Received ${signal}. Terminating all services...`);
 
     for (const [name] of serviceRegistry) {
         stopService(name);
