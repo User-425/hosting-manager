@@ -46,7 +46,7 @@ async function main() {
         setAppConfig(loaded);
     }
 
-    const publicPort = Number(process.env.PORT) || appConfig.settings?.publicPort || 25575;
+    const publicPort = Number(process.env.PORT) || appConfig.settings?.publicPort || 8000;
 
     log("INIT", "SYSTEM", "Checking dependencies and builds for enabled services...");
     for (const [name, conf] of Object.entries(appConfig.services)) {

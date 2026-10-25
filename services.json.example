@@ -1,6 +1,6 @@
 {
   "settings": {
-    "publicPort": 25575,
+    "publicPort": 8000,
     "runner": "builtin",
     "terminalEnabled": true,
     "terminalPath": "/terminal",

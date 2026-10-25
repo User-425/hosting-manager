@@ -4,9 +4,9 @@ services:
     container_name: hosting-manager
     restart: unless-stopped
     ports:
-      - "${PORT:-443}:${PORT:-443}"
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
-      - PORT=${PORT:-443}
+      - PORT=${PORT:-8000}
       - ADMIN_SECRET=${ADMIN_SECRET:-my_super_secret_admin_key}
       - NODE_ENV=production
     volumes:

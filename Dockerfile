@@ -21,10 +21,10 @@ RUN test -f services.json || cp services.json.example services.json
 RUN test -f .env || cp .env.example .env
 
 # Expose default gateway port
-ENV PORT=443
+ENV PORT=8000
 ENV NODE_ENV=production
 
-EXPOSE 443
+EXPOSE 8000
 
 # Start hosting manager
 CMD ["npm", "start"]
