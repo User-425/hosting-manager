@@ -1,0 +1,13 @@
+services:
+  hosting-manager:
+    build: .
+    container_name: hosting-manager
+    restart: unless-stopped
+    ports:
+      - "${PORT:-443}:${PORT:-443}"
+    environment:
+      - PORT=${PORT:-443}
+      - ADMIN_SECRET=${ADMIN_SECRET:-my_super_secret_admin_key}
+      - NODE_ENV=production
+    volumes:
+      - ./services.json:/app/services.json:ro
